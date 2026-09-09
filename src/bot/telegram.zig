@@ -242,14 +242,18 @@ pub const Api = struct {
     }
 };
 
-/// Разбирает ответ getUpdates. Строки ссылаются на `bytes` — держите их
-/// в одной арене (в вызывающем коде арена живёт дольше вызова).
+/// Разбирает ответ getUpdates. Все строки копируются в арены вызывающего
+/// (арены цикла хватает на всю обработку пачки) — поэтому Leaky: собственная
+/// арена parseFromSlice умерла бы ВМЕСТЕ со строками, и msg.text стал бы
+/// висячим указателем (краш на первом же сообщении — ловили на проде).
 pub fn parseUpdates(alloc: std.mem.Allocator, bytes: []const u8) ![]Update {
     const P = struct { ok: bool = false, result: []Update = &.{} };
-    const parsed = try std.json.parseFromSlice(P, alloc, bytes, .{ .ignore_unknown_fields = true });
-    defer parsed.deinit();
-    if (!parsed.value.ok) return error.TelegramApi;
-    return alloc.dupe(Update, parsed.value.result);
+    const parsed = try std.json.parseFromSliceLeaky(P, alloc, bytes, .{
+        .ignore_unknown_fields = true,
+        .allocate = .alloc_always, // не ссылаться на буфер ответа
+    });
+    if (!parsed.ok) return error.TelegramApi;
+    return parsed.result;
 }
 
 /// Разбирает тело webhook-запроса (одиночный объект Update).
@@ -303,6 +307,21 @@ test "parseUpdates: not ok → ошибка" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     try std.testing.expectError(error.TelegramApi, parseUpdates(arena.allocator(), "{\"ok\":false,\"error_code\":409}"));
+}
+
+test "parseUpdates: строки живут в арены вызывающего, а не в буфере ответа" {
+    // регрессия прод-краша: parseFromSlice+deinit оставляли msg.text висячим.
+    // Здесь: портили буфер ПОСЛЕ парсинга — строки обязаны уцелеть.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const buf = try a.dupe(u8, "{\"ok\":true,\"result\":[{\"update_id\":7,\"message\":{\"chat\":{\"id\":1},\"from\":{\"id\":1,\"first_name\":\"Аня\"},\"text\":\"/start\"}}]}");
+    const ups = try parseUpdates(a, buf);
+    try std.testing.expectEqual(@as(usize, 1), ups.len);
+    // затираем исходный буфер — строки спрятаны в арене
+    @memset(buf, 'X');
+    try std.testing.expectEqualStrings("/start", ups[0].message.?.text.?);
+    try std.testing.expectEqualStrings("Аня", ups[0].message.?.from.?.first_name.?);
 }
 
 test "конфликт 409 ищется в теле ответа" {
