@@ -4,7 +4,7 @@
 
 Прод — docker compose из трёх слоёв (**bot + postgres + tor**) на Arch-хосте в локальной сети; связь с Telegram — **через Tor** (SOCKS5, мосты obfs4). Операционный контур как у rbot: `/monitor`, послойные рестарты, стоп-краны, idle-статистика, обучающий визард, заявки на доступ кнопками.
 
-История версий — [docs/CHANGELOG.md](docs/CHANGELOG.md), хронология разработки — [docs/TIMELINE.md](docs/TIMELINE.md).
+История версий — [docs/CHANGELOG.md](docs/CHANGELOG.md), хронология разработки — [docs/TIMELINE.md](docs/TIMELINE.md), большой обзор проекта (все фичи, цифры, архитектура, как изучать) — [docs/OVERVIEW.md](docs/OVERVIEW.md).
 
 ```
 🌒 Луна не холостая
