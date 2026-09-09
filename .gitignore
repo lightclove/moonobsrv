@@ -4,3 +4,5 @@ tools/
 data/
 *.log
 .env
+dist/
+ci/tor/torrc

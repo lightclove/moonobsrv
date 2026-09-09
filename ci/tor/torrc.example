@@ -1,0 +1,19 @@
+# Клиентский Tor: SOCKS для приватной сети compose, без выхода наружу.
+SocksPort 0.0.0.0:9050
+SocksPolicy accept 10.0.0.0/8
+SocksPolicy accept 172.16.0.0/12
+SocksPolicy accept 192.168.0.0/16
+SocksPolicy accept 127.0.0.1
+SocksPolicy reject *
+ControlPort 127.0.0.1:9051
+CookieAuthentication 0
+ClientOnly 1
+SafeLogging 1
+AvoidDiskWrites 1
+
+# Если провайдер блокирует прямые соединения с сетью Tor — включите мосты:
+# скопируйте этот файл в torrc и подставьте свои obfs4-мосты (lyrebird уже в образе).
+# torrc с мостами не коммитим и не публикуем.
+#UseBridges 1
+#ClientTransportPlugin obfs4 exec /usr/bin/lyrebird
+#Bridge obfs4 <ip>:<port> <fingerprint> cert=<...> iat-mode=0

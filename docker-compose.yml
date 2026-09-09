@@ -1,0 +1,48 @@
+# moonobsrv: bot + postgres. Прод-оверлей (tor) — docker-compose.prod.yml.
+# Имя проекта — метка, по которой /monitor и /restart* находят контейнеры.
+name: moonobsrv
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: moon
+      POSTGRES_PASSWORD: moon
+      POSTGRES_DB: sky
+      # сеть compose изолирована; в проде хост-порт не публикуется
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "127.0.0.1:5433:5432" # только локально для разработки
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U moon -d sky"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  bot:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      MOONOBSRV_DB: postgresql://moon@db:5432/sky
+      MOONOBSRV_DATA_DIR: /data
+    volumes:
+      # Docker Engine API для /monitor и /restart* (как в rbot)
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/data
+    healthcheck:
+      # heartbeat-файл жив? (пишется каждым циклом; протух → контейнер нездоров)
+      test: ["CMD-SHELL", "hb=$(cat /tmp/moonobsrv.hb 2>/dev/null || echo 0); now=$(date +%s); test $((now - hb)) -lt 300"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+    restart: unless-stopped
+
+volumes:
+  pgdata:

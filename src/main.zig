@@ -103,6 +103,7 @@ pub fn main() !void {
         while (true) : (attempt += 1) {
             wd.beat();
             if (st.attachDb(cfg.db_url, cfg.admin_id)) {
+                log("postgres: подключен, схема готова", .{});
                 break;
             } else |_| {}
             if (attempt >= 19) {
@@ -163,8 +164,8 @@ pub fn main() !void {
         }
     }
 
-    // watchdog: heartbeat жив — иначе abort, Docker поднимет
-    const watchdog = try std.Thread.spawn(.{}, watchdogLoop, .{&api, &cfg});
+    // watchdog: heartbeat жив — иначе trap, Docker поднимет
+    const watchdog = try std.Thread.spawn(.{}, watchdogLoop, .{});
     watchdog.detach();
 
     // Фоновый поток ватчеров: уведомления о переходах не зависят
@@ -224,9 +225,7 @@ fn watcherLoop(alloc: std.mem.Allocator, cfg: *const config.Config, st: *storemo
 }
 
 /// Сторож зависаний: процесс молчит дольше HUNG_SECS — trap, Docker поднимет.
-fn watchdogLoop(api: *tg.Api, cfg: *const config.Config) void {
-    _ = api;
-    _ = cfg;
+fn watchdogLoop() void {
     const start = std.time.timestamp();
     while (true) {
         std.Thread.sleep(@as(u64, wd.WATCHDOG_TICK_S) * std.time.ns_per_s);
@@ -275,7 +274,7 @@ fn runPolling(alloc: std.mem.Allocator, cfg: *const config.Config, st: *storemod
 
             // стоп-кран: пачку смотрим целиком ДО любой обработки
             if (rst.batchBrake(updates, cfg.admin_id)) |brake| {
-                drainBrake(alloc, cfg, st, api, updates, brake);
+                drainBrake(st, api, updates, brake);
                 offset = brake.offset;
                 continue;
             }
@@ -301,7 +300,7 @@ fn runPolling(alloc: std.mem.Allocator, cfg: *const config.Config, st: *storemod
 const Brake = rst.BatchBrake;
 
 /// Подтверждаем всю пачку, ничего не выполняем; Hard — плюс один рестарт.
-fn drainBrake(alloc: std.mem.Allocator, cfg: *const config.Config, st: *storemod.Store, api: *tg.Api, updates: []const tg.Update, brake: Brake) void {
+fn drainBrake(st: *storemod.Store, api: *tg.Api, updates: []const tg.Update, brake: Brake) void {
     log("стоп-кран {s}: отбрасываю {d} апдейтов, offset={d}", .{ @tagName(brake.kind), updates.len, brake.offset });
     st.setUpdateCursor(brake.max_id) catch {};
     wd.saveTgOffset(brake.max_id);

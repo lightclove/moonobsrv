@@ -1,0 +1,22 @@
+# Прод-оверлей: Telegram API ходит через Tor (socks5), БД не торчит наружу.
+# docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+services:
+  db:
+    ports: !reset []
+
+  tor:
+    build: ./ci/tor
+    restart: unless-stopped
+    # healthcheck наследуется из ci/tor/Dockerfile (bootstrap 100%)
+
+  bot:
+    depends_on:
+      db:
+        condition: service_healthy
+      tor:
+        condition: service_healthy
+    environment:
+      MOONOBSRV_DB: postgresql://moon@db:5432/sky
+      MOONOBSRV_TOR: socks5://tor:9050
+      HTTPS_PROXY: socks5://tor:9050
+      https_proxy: socks5://tor:9050

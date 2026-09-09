@@ -418,7 +418,7 @@ pub const Store = struct {
         var b: [192]u8 = undefined;
         var w: std.Io.Writer = .fixed(&b);
         w.print("INSERT INTO app_user (tg_id, status, created_at, decided_at) VALUES ({d}, 'active', {d}, {d}) ON CONFLICT (tg_id) DO UPDATE SET status = 'active', decided_at = {d}", .{ id, std.time.timestamp(), std.time.timestamp(), std.time.timestamp() }) catch return false;
-        const ok = db.exec(arena.allocator(), w.buffered());
+        const ok = if (db.exec(arena.allocator(), w.buffered())) |_| true else |_| false;
         self.db_ok = ok;
         if (ok) {
             self.mutex.lock();

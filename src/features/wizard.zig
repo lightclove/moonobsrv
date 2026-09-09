@@ -587,7 +587,7 @@ pub fn tocKb(w: *std.Io.Writer, page: usize, admin: bool) !void {
         var b: [16]u8 = undefined;
         try btn(w, "➡️", std.fmt.bufPrint(&b, "wiz:toc:{d}", .{p + 1}) catch "");
     }
-    try w.writeAll("]],[");
+    try w.writeAll("],[");
     try btn(w, "▶️ Слайд 1", "wiz:p:0");
     try w.writeByte(',');
     try btn(w, "❌ Закрыть", "wiz:close");

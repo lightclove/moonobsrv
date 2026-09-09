@@ -13,9 +13,10 @@ const socks5 = @import("socks5.zig");
 
 const tls = std.crypto.tls;
 
-/// Буферы: максимум TLS-кадра + запас на заголовки ответа.
+/// Буферы: каждый ≥ tls.min_buffer_len (~16.7 КБ) — TLS-писатель требует
+/// столько у сокет-писателя под один шифрокадр (меньше = UB в релизе).
 const sock_rbuf_len = 17 * 1024;
-const sock_wbuf_len = 8 * 1024;
+const sock_wbuf_len = 17 * 1024;
 const tls_rbuf_len = 17 * 1024 + 8 * 1024;
 const tls_wbuf_len = 17 * 1024;
 
@@ -59,20 +60,26 @@ pub const Client = struct {
 
     fn ensureConnected(self: *Client, host: []const u8, port: u16) !void {
         if (self.stream != null) return;
+        dbg("connect: {s}:{d} proxy={s}", .{ host, port, if (self.proxy != null) "да" else "нет" });
         const stream = if (self.proxy) |p| blk: {
             const s = try std.net.tcpConnectToHost(self.alloc, p.host, p.port);
+            setSocketTimeout(s, 30);
+            dbg("tcp до прокси ок, socks handshake", .{});
             socks5.handshake(s, host, port) catch |e| {
                 s.close();
                 return e;
             };
+            dbg("socks ок", .{});
             break :blk s;
         } else try std.net.tcpConnectToHost(self.alloc, host, port);
+        setSocketTimeout(stream, 75); // > long poll (50 с) с запасом
         errdefer {
             stream.close();
             self.stream = null;
         }
         self.stream_reader = std.net.Stream.reader(stream, &self.sock_rbuf);
         self.stream_writer = std.net.Stream.writer(stream, &self.sock_wbuf);
+        dbg("ca rescan", .{});
         if (!self.ca_ready) {
             self.ca_mutex.lock();
             defer self.ca_mutex.unlock();
@@ -81,6 +88,7 @@ pub const Client = struct {
                 self.ca_ready = true;
             }
         }
+        dbg("tls handshake", .{});
         self.tls_client = try tls.Client.init(
             self.stream_reader.interface(),
             &self.stream_writer.interface,
@@ -89,9 +97,10 @@ pub const Client = struct {
                 .ca = .{ .bundle = self.ca },
                 .read_buffer = &self.tls_rbuf,
                 .write_buffer = &self.tls_wbuf,
-                .allow_truncation_attacks = true, // длина проверяет HTTP
+                .allow_truncation_attacks = true, // длину проверяет HTTP
             },
         );
+        dbg("tls ок", .{});
         self.stream = stream;
     }
 
@@ -128,17 +137,23 @@ pub const Client = struct {
     fn requestOnce(self: *Client, opts: RequestOptions, out: *std.Io.Writer.Allocating) !u16 {
         try self.ensureConnected(opts.host, opts.port);
         const w = self.writer();
+        dbg("req: пишу заголовки", .{});
         try w.print("{s} {s} HTTP/1.1\r\nHost: {s}\r\nUser-Agent: moonobsrv/1\r\nAccept: application/json\r\nConnection: keep-alive\r\n", .{ opts.method, opts.path, opts.host });
         if (opts.body) |b| {
             try w.print("Content-Type: {s}\r\nContent-Length: {d}\r\n", .{ opts.content_type, b.len });
         }
         try w.writeAll("\r\n");
         if (opts.body) |b| try w.writeAll(b);
+        dbg("req: flush", .{});
         try w.flush();
-
+        // flush TLS-писателя только кладёт шифротекст в буфер сокет-писателя —
+        // вытолкиваем его в сокет (для plain-режима повторный flush пуст и безвреден)
+        try self.stream_writer.interface.flush();
+        dbg("req: отправлено, читаю статус", .{});
         const r = self.reader();
         // Статус-строка: HTTP/1.1 200 OK (takeDelimiterInclusive съедает \n)
         const status_line = r.takeDelimiterInclusive('\n') catch return error.HttpReadFailed;
+        dbg("req: статус: {s}", .{status_line[0..@min(status_line.len, 20)]});
         if (status_line.len < 12 or !std.mem.startsWith(u8, status_line, "HTTP/1.")) return error.BadStatusLine;
         const status = std.fmt.parseInt(u16, std.mem.trim(u8, status_line[9..12], " "), 10) catch return error.BadStatusLine;
 
@@ -215,6 +230,37 @@ fn readInto(r: *std.Io.Reader, out: *std.Io.Writer.Allocating, n: usize) !void {
         remaining -= want;
     }
 }
+
+/// SO_RCVTIMEO/SO_SNDTIMEO: блокирующий сокет не должен висеть вечно.
+fn setSocketTimeout(stream: std.net.Stream, seconds: u32) void {
+    const builtin = @import("builtin");
+    if (builtin.os.tag == .windows) {
+        const ms: u32 = seconds * 1000;
+        _ = std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&ms)) catch {};
+        _ = std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&ms)) catch {};
+    } else {
+        const tv = std.posix.timeval{ .sec = @intCast(seconds), .usec = 0 };
+        _ = std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
+        _ = std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&tv)) catch {};
+    }
+}
+
+fn dbg(comptime fmt: []const u8, args: anytype) void {
+    if (!dbgEnabled()) return;
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    w.print("[net] " ++ fmt ++ "\n", args) catch return;
+    std.fs.File.stderr().writeAll(w.buffered()) catch {};
+}
+
+fn dbgEnabled() bool {
+    if (dbg_cached) |v| return v;
+    const v = std.process.hasEnvVar(std.heap.page_allocator, "MOONOBSRV_NET_DEBUG") catch false;
+    dbg_cached = v;
+    return v;
+}
+
+var dbg_cached: ?bool = null;
 
 test "readChunked: кадры и trailer" {
     var sr = std.Io.Reader.fixed("5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n");

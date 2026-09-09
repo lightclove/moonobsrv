@@ -138,13 +138,13 @@ fn onMenu(base: router.Base, cb_id: []const u8, chat_id: ?i64, message_id: ?i64,
             var kw: std.Io.Writer = .fixed(&kb);
             menuKb(&kw) catch {};
             if (message_id != null) {
-                const edited = api.editMessageText(chat_id.?, message_id.?, out, false, kb.buffered()) catch false;
+                const edited = api.editMessageText(chat_id.?, message_id.?, out, false, kw.buffered()) catch false;
                 if (edited) {
                     api.answerCallbackQuery(cb_id, "", false);
                     return;
                 }
             }
-            _ = api.sendMessageOpts(chat_id.?, out, false, kb.buffered()) catch {};
+            _ = api.sendMessageOpts(chat_id.?, out, false, kw.buffered()) catch {};
             api.answerCallbackQuery(cb_id, "", false);
             return;
         }

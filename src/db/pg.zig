@@ -223,6 +223,8 @@ pub const Conn = struct {
     pub fn connect(self: *Conn) Error!void {
         if (self.stream != null) return;
         const s = std.net.tcpConnectToHost(self.alloc, self.url.host, self.url.port) catch return Error.PgConnect;
+        // БД не должна держать вечно: handshake/запросы — 15 с, хватит с запасом.
+        setSocketTimeout(s, 15);
         errdefer {
             s.close();
             self.stream = null;
@@ -385,6 +387,19 @@ fn log(comptime fmt: []const u8, args: anytype) void {
     var w: std.Io.Writer = .fixed(&buf);
     w.print("[pg] " ++ fmt ++ "\n", args) catch return;
     std.fs.File.stderr().writeAll(w.buffered()) catch {};
+}
+
+/// Блокирующий сокет не должен висеть вечно (handshake/запросы БД).
+fn setSocketTimeout(stream: std.net.Stream, seconds: u32) void {
+    if (comptime @import("builtin").os.tag == .windows) {
+        const ms: u32 = seconds * 1000;
+        _ = std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&ms)) catch {};
+        _ = std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&ms)) catch {};
+    } else {
+        const tv = std.posix.timeval{ .sec = @intCast(seconds), .usec = 0 };
+        _ = std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
+        _ = std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&tv)) catch {};
+    }
 }
 
 // ─── Тесты: чистые функции + фейковый сервер ───────────────────────────────

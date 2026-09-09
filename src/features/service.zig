@@ -41,6 +41,7 @@ fn cmdStatus(ctx: *router.Ctx) !void {
     var b_tz: [24]u8 = undefined;
     const uptime = if (runtime.started_at > 0) std.time.timestamp() - runtime.started_at else 0;
     try ctx.reply.print("🛰 moonobsrv v{s}\n", .{runtime.version});
+    try ctx.reply.print("Ваш id: {d}\n", .{ctx.chat_id});
     try ctx.reply.print("Аптайм: {s}\n", .{util.fmtDur(&b_dur, uptime)});
     try ctx.reply.print("Подписчиков: {d}\n", .{ctx.base.store.subs.items.len});
     try ctx.reply.print("Проверка неба: каждые {d} с\n", .{ctx.base.cfg.check_interval_s});

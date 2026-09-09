@@ -193,10 +193,8 @@ fn diskPct() ?u8 {
         .argv = &.{ "df", "-P", "/" },
         .max_output_bytes = 4096,
     }) catch return null;
-    const stdout = switch (out) {
-        .Exited => |o| o.stdout,
-        else => return null,
-    };
+    if (out.term != .Exited) return null;
+    const stdout = out.stdout;
     var it = std.mem.splitScalar(u8, stdout, '\n');
     _ = it.next();
     const line = it.next() orelse return null;

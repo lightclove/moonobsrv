@@ -1,0 +1,15 @@
+.git
+.zig-cache
+zig-out
+tools
+data
+backups
+.env
+.env.example
+tg_test.log
+repro.zig
+deploy.cmd
+docs
+src
+build.zig
+z.cmd
