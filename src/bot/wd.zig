@@ -287,7 +287,7 @@ pub fn dockerHttpEx(arena: std.mem.Allocator, method: []const u8, path: []const 
         if (n == buf.len) {
             if (cap >= 1024 * 1024) return null;
             cap *= 2;
-            buf = arena.realloc(u8, buf, cap) catch return null;
+            buf = arena.realloc(buf, cap) catch return null;
         }
         const got = stream.read(buf[n..]) catch break;
         if (got == 0) break;
