@@ -9,6 +9,7 @@ const dispatch = @import("../dispatch.zig");
 const log = @import("../log.zig").log;
 const storemod = @import("store.zig");
 const tg = @import("telegram.zig");
+const wd = @import("wd.zig");
 
 pub fn serve(alloc: std.mem.Allocator, cfg: *const config.Config, st: *storemod.Store, api: *tg.Api) !void {
     // Ожидаемый путь запроса берём из публичного URL (например /tg/abc).
@@ -27,6 +28,9 @@ pub fn serve(alloc: std.mem.Allocator, cfg: *const config.Config, st: *storemod.
     log("webhook: слушаю {s}, путь {s}", .{ cfg.listen, path });
 
     while (true) {
+        // главный поток здесь единственный источник heartbeat: без входящих
+        // запросов watchdog посчитал бы процесс зависшим и убил бы его
+        wd.beat();
         const conn = listener.accept() catch |e| {
             log("webhook: accept: {s}", .{@errorName(e)});
             std.Thread.sleep(std.time.ns_per_s);
@@ -80,12 +84,14 @@ fn handleRequest(
     req: *std.http.Server.Request,
     path: []const u8,
 ) !void {
+    // Отвечаем без keep-alive: однопоточный accept не должен парковаться
+    // на простаивающем соединении терминатора до его idle-таймаута.
     if (req.head.method != .POST) {
-        try req.respond("ok", .{ .status = .ok });
+        try req.respond("ok", .{ .status = .ok, .keep_alive = false });
         return;
     }
     if (!std.mem.eql(u8, req.head.target, path)) {
-        try req.respond("not found", .{ .status = .not_found });
+        try req.respond("not found", .{ .status = .not_found, .keep_alive = false });
         return;
     }
 
@@ -102,7 +108,7 @@ fn handleRequest(
         }
         if (!authed) {
             log("webhook: отклонён запрос с неверным секретом", .{});
-            try req.respond("forbidden", .{ .status = .forbidden });
+            try req.respond("forbidden", .{ .status = .forbidden, .keep_alive = false });
             return;
         }
     }
@@ -113,11 +119,17 @@ fn handleRequest(
     defer alloc.free(body);
 
     // Telegram ждёт быстрого 200 — подтверждаем до обработки.
-    try req.respond("OK", .{ .status = .ok });
+    try req.respond("OK", .{ .status = .ok, .keep_alive = false });
 
-    const update = tg.parseUpdate(alloc, body) catch {
+    // Арена на запрос: parseUpdate (leaky) аллоцирует экранированные строки
+    // (\n, \", \u… — Telegram сериализует так почти любой содержательный
+    // текст), и без арены они утекали бы в page_allocator на каждом апдейте.
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const update = tg.parseUpdate(arena, body) catch {
         log("webhook: не разобрано тело обновления ({d} байт)", .{body.len});
         return;
     };
-    dispatch.handleUpdate(alloc, cfg, st, api, &update);
+    dispatch.handleUpdate(arena, cfg, st, api, &update);
 }

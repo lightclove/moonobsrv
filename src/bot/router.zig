@@ -28,6 +28,9 @@ pub const Ctx = struct {
     /// Полный текст сообщения (для превью в заявке на доступ).
     raw_text: []const u8 = "",
     reply: *std.Io.Writer,
+    /// Хендлер написал HTML — sendReply отправит с parse_mode=HTML.
+    /// По умолчанию плоский текст (безопасно при пользовательском вводе).
+    reply_html: bool = false,
     cmd: *const Command,
     args: []const u8 = &.{},
 

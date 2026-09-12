@@ -56,3 +56,18 @@ pub fn phaseName(e: f64) []const u8 {
     if (e < 285.0) return "последняя четверть";
     return "старая луна";
 }
+
+/// Последнее новолуние не позже jd0 (в самый момент новолуния — оно же):
+/// сырая элонгация проходит очередной уровень 360°·k.
+pub fn lastNewMoonJd(jd0: f64) f64 {
+    const f = ElongFn{};
+    const target = @floor(f.eval(jd0) / 360.0) * 360.0;
+    return ang.bisectRising(ElongFn, f, jd0 - 31.0, jd0, target);
+}
+
+/// Ближайшее новолуние строго после jd0 (синодический месяц < 31 сут).
+pub fn nextNewMoonJd(jd0: f64) f64 {
+    const f = ElongFn{};
+    const target = (@floor(f.eval(jd0) / 360.0) + 1.0) * 360.0;
+    return ang.bisectRising(ElongFn, f, jd0, jd0 + 31.0, target);
+}

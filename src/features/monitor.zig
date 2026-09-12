@@ -89,6 +89,7 @@ fn cmdIdle(ctx: *router.Ctx) !void {
     var buf: [4096]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
     try mon.fmtIdle(&w, kind, ctx.base.now, ctx.base.cfg.tz_offset_sec, samples);
+    ctx.reply_html = true; // fmtIdle пишет <b>
     try ctx.reply.writeAll(w.buffered());
 }
 
@@ -110,12 +111,11 @@ fn cmdRestart(ctx: *router.Ctx) !void {
 
     const plan = rst.planRestart(t, runtime.started_at, ctx.base.now, wd.bounceAge());
     if (plan == .skip_stale) {
-        return ctx.reply.writeAll("повтор /restart из очереди Telegram пропущен — бот уже после перезапуска.\nЖивой срез: /monitor");
+        return ctx.reply.writeAll("повтор /restart пропущен: команда из старой очереди либо рестарт только что был (кулдаун 90 с).\nЖивой срез: /monitor");
     }
 
     // ACK до docker-restart: подтверждаем очередь, иначе бутлуп
     ctx.base.api.ack(ctx.base.store.updateCursor() + 1) catch {};
-    ctx.base.store.setUpdateCursor(ctx.base.store.updateCursor()) catch {};
     wd.noteBounce();
     ctx.base.store.putLayerSample(std.time.timestamp(), ~rst.downMask(t), 0);
 
@@ -158,11 +158,16 @@ fn cmdReset(ctx: *router.Ctx) !void {
     var w: std.Io.Writer = .fixed(&buf);
     const hard = ctx.cmd.name[1] == 'h';
     try rst.resetText(&w, 1, hard);
-    try ctx.reply.writeAll(w.buffered());
     if (hard) {
+        // ответ обязан уйти ДО смерти процесса: в webhook-режиме роутер не
+        // проходит через batchBrake (там текст шлёт drainBrake) — админ
+        // остался бы без подтверждения
+        _ = ctx.base.api.sendMessageOpts(ctx.chat_id, w.buffered(), true, null) catch {};
         log("hardreset: рестарт процесса по команде админа", .{});
         rst.bounceSelf();
     }
+    ctx.reply_html = true; // resetText пишет <b>
+    try ctx.reply.writeAll(w.buffered());
 }
 
 fn cmdUsers(ctx: *router.Ctx) !void {
@@ -186,6 +191,7 @@ fn cmdUsers(ctx: *router.Ctx) !void {
         if (u.id == ctx.base.cfg.admin_id) try w.writeAll(" (admin)");
         try w.writeAll("\n");
     }
+    ctx.reply_html = true; // <code> в строках
     try ctx.reply.writeAll(w.buffered());
 }
 
@@ -199,6 +205,7 @@ fn cmdRevoke(ctx: *router.Ctx) !void {
     }
     if (ctx.base.store.revokeUser(id)) {
         ctx.base.api.sendMessage(id, "Ваш доступ к боту отозван.") catch {};
+        ctx.reply_html = true; // <code> в ответе
         try ctx.reply.print("Доступ отозван у <code>{d}</code>.", .{id});
     } else {
         try ctx.reply.writeAll("Пользователь не найден или уже не active.");
@@ -214,8 +221,12 @@ pub fn hostDiskPct() ?u8 {
         .argv = &.{ "df", "-P", "/" },
         .max_output_bytes = 4096,
     }) catch return null;
-if (out.term != .Exited) return null;
-const stdout = out.stdout;
+    // вывод Child.run — во владение вызывающему: сэмплы раз в минуту и
+    // каждый /monitor без free утекали линейно
+    defer std.heap.page_allocator.free(out.stdout);
+    defer std.heap.page_allocator.free(out.stderr);
+    if (out.term != .Exited) return null;
+    const stdout = out.stdout;
     var it = std.mem.splitScalar(u8, stdout, '\n');
     _ = it.next(); // заголовок
     const line = it.next() orelse return null;
@@ -298,7 +309,8 @@ fn hostOnAc() ?bool {
         var ob: [8]u8 = undefined;
         const on = of.readAll(&ob) catch continue;
         of.close();
-        return std.mem.trim(u8, ob[0..on], " \r\n")[0] == '1';
+        const online = std.mem.trim(u8, ob[0..on], " \r\n");
+        return if (online.len == 0) null else online[0] == '1'; // пустой файл — не падаем
     }
     return null;
 }

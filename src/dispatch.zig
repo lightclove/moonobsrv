@@ -64,6 +64,8 @@ pub fn handleMessage(
     var aw: std.Io.Writer.Allocating = .init(a);
     defer aw.deinit();
 
+    var reply_html = false;
+
     const base = router.Base{
         .alloc = a,
         .now = std.time.timestamp(),
@@ -96,11 +98,11 @@ pub fn handleMessage(
             if (!known) {
                 const flow = access.handleUnknown(&ctx) catch {
                     ctx.reply.print("⚠ Не удалось оформить заявку, попробуйте позже.", .{}) catch {};
-                    sendReply(api, chat_id, aw.written());
+                    sendReply(api, chat_id, aw.written(), false);
                     return;
                 };
                 if (flow == .handled) {
-                    sendReply(api, chat_id, aw.written());
+                    sendReply(api, chat_id, aw.written(), false);
                     return;
                 }
             }
@@ -108,12 +110,20 @@ pub fn handleMessage(
 
         m.cmd.handler(&ctx) catch |e| {
             log("команда {s}: {s}", .{ m.cmd.name, @errorName(e) });
-            var ebuf: [128]u8 = undefined;
-            var ew: std.Io.Writer = .fixed(&ebuf);
-            ew.print("⚠ Внутренняя ошибка, попробуйте позже.", .{}) catch {};
-            api.sendMessage(chat_id, ew.buffered()) catch {};
+            // хендлер мог оставить внятный текст (подсказка о формате даты
+            // из Ctx.moment и т.п.) — отправляем его, шаблонный текст только
+            // когда ответ пуст
+            if (aw.written().len > 0) {
+                sendReply(api, chat_id, aw.written(), ctx.reply_html);
+            } else {
+                var ebuf: [128]u8 = undefined;
+                var ew: std.Io.Writer = .fixed(&ebuf);
+                ew.print("⚠ Внутренняя ошибка, попробуйте позже.", .{}) catch {};
+                api.sendMessage(chat_id, ew.buffered()) catch {};
+            }
             return;
         };
+        reply_html = ctx.reply_html;
     } else if (text.len > 0 and text[0] == '/') {
         // неизвестная команда — предлагаем гид (как rbot)
         var buf: [512]u8 = undefined;
@@ -128,15 +138,15 @@ pub fn handleMessage(
         return; // обычное сообщение — игнорируем
     }
 
-    sendReply(api, chat_id, aw.written());
+    sendReply(api, chat_id, aw.written(), reply_html);
 }
 
-fn sendReply(api: *tg.Api, chat_id: i64, out: []const u8) void {
+fn sendReply(api: *tg.Api, chat_id: i64, out: []const u8, html: bool) void {
     if (out.len == 0) return;
     // лимит Telegram — 4096 символов; режем с запасом на границе UTF-8
     var cut = @min(out.len, 3900);
     while (cut > 0 and (out[cut] & 0xC0) == 0x80) cut -= 1;
-    api.sendMessage(chat_id, out[0..cut]) catch |e| {
+    _ = api.sendMessageOpts(chat_id, out[0..cut], html, null) catch |e| {
         log("sendMessage: {s}", .{@errorName(e)});
     };
 }

@@ -47,6 +47,6 @@ pub const commands = blk: {
 
 comptime {
     if (commands.len == 0) @compileError("реестр команд пуст");
-    // буфер setMyCommands в main.zig рассчитан на 64 команды
-    if (commands.len > 64) @compileError("слишком много команд для setMyCommands");
+    // лимит Bot API — 100 команд на setMyCommands; буфер в main.zig тот же
+    if (commands.len > 100) @compileError("слишком много команд для setMyCommands (лимит Telegram — 100)");
 }

@@ -60,8 +60,9 @@ if ($LASTEXITCODE -ne 0) { throw 'tar failed' }
 Write-Host '=== push -> Arch ===' -ForegroundColor Cyan
 & scp.exe @SshOpts -P $Port $Tgz "${User}@${Ip}:/tmp/moonobsrv-src.tgz"
 if ($LASTEXITCODE -ne 0) { throw 'scp failed' }
-# plain single-quoted string: no $()/&& inside double quotes for PS5
-$remote = 'mkdir -p ~/Work/moonobsrv && cd ~/Work/moonobsrv && tar -xzf /tmp/moonobsrv-src.tgz && chmod +x ci/*.sh scripts/*.sh 2>/dev/null; rm -f /tmp/moonobsrv-src.tgz && bash ci/remote-apply.sh'
+# plain single-quoted string: no $()/&& inside double quotes for PS5.
+# tar-неудача обязана рвать цепочку — иначе выкатится СТАРЫЙ код с exit 0.
+$remote = 'mkdir -p ~/Work/moonobsrv && cd ~/Work/moonobsrv && tar -xzf /tmp/moonobsrv-src.tgz && (chmod +x ci/*.sh scripts/*.sh 2>/dev/null || true) && rm -f /tmp/moonobsrv-src.tgz && bash ci/remote-apply.sh'
 & ssh.exe @SshOpts -p $Port "$User@$Ip" $remote
 if ($LASTEXITCODE -ne 0) { throw 'remote-apply failed' }
 Write-Host 'prod updated' -ForegroundColor Green

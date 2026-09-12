@@ -205,6 +205,10 @@ fn bootstrapState(st: *storemod.Store) void {
 
 fn watcherLoop(alloc: std.mem.Allocator, cfg: *const config.Config, st: *storemod.Store, api: *tg.Api) void {
     while (true) {
+        // ватчер жив и работает — это и есть активность процесса: в webhook-
+        // режиме при тишине от Telegram других источников heartbeat нет,
+        // watchdog посчитал бы процесс зависшим и убивал бы его каждые 5 мин
+        wd.beat();
         std.Thread.sleep(@as(u64, cfg.check_interval_s) * std.time.ns_per_s);
         const now = std.time.timestamp();
         var arena = std.heap.ArenaAllocator.init(alloc);
@@ -264,6 +268,7 @@ fn runPolling(alloc: std.mem.Allocator, cfg: *const config.Config, st: *storemod
         };
         fmonitor.runtime_tg_ok = true;
         ps.consec_fails = 0;
+        recoverAlert(cfg, api, &ps);
 
         var max_id: i64 = 0;
         {
@@ -298,6 +303,17 @@ fn runPolling(alloc: std.mem.Allocator, cfg: *const config.Config, st: *storemod
 }
 
 const Brake = rst.BatchBrake;
+
+/// Восстановление после сбоя опроса: один алерт «снова доступен» и чистим
+/// pending (иначе текст первого сбоя повторялся бы вечно, а буфер утекал).
+fn recoverAlert(cfg: *const config.Config, api: *tg.Api, ps: *PollState) void {
+    const t = ps.alert_pending orelse return;
+    if (cfg.adminMode()) {
+        api.alertDirect(cfg.admin_id, "✅ moonobsrv: Telegram снова доступен.");
+    }
+    std.heap.page_allocator.free(t);
+    ps.alert_pending = null;
+}
 
 /// Подтверждаем всю пачку, ничего не выполняем; Hard — плюс один рестарт.
 fn drainBrake(st: *storemod.Store, api: *tg.Api, updates: []const tg.Update, brake: Brake) void {
@@ -354,7 +370,8 @@ fn onPollFail(alloc: std.mem.Allocator, cfg: *const config.Config, st: *storemod
         }
     }
 
-    // алерт админу: один на эпизод, повтор недоставленного
+    // алерт админу: один на эпизод, повтор недоставленного.
+    // Восстановление («снова доступен») — в успешной ветке runPolling.
     if (cfg.adminMode() and ps.consec_fails >= wd.FAIL_NEED) {
         if (ps.alert_pending == null and now - ps.alert_last >= wd.ALERT_COOLDOWN_S) {
             var buf: [256]u8 = undefined;
@@ -372,13 +389,6 @@ fn onPollFail(alloc: std.mem.Allocator, cfg: *const config.Config, st: *storemod
                 ps.alert_last = now;
             }
         }
-    } else if (ps.consec_fails == 0 and ps.alert_pending != null) {
-        // восстановление — уведомим и почистим
-        if (cfg.adminMode()) {
-            api.alertDirect(cfg.admin_id, "✅ moonobsrv: Telegram снова доступен.");
-        }
-        if (ps.alert_pending) |t| std.heap.page_allocator.free(t);
-        ps.alert_pending = null;
     }
 
     std.Thread.sleep(@as(u64, wd.backoffSecs(ps.consec_fails)) * std.time.ns_per_s);
@@ -398,9 +408,10 @@ fn maybeSample(alloc: std.mem.Allocator, cfg: *const config.Config, st: *storemo
 
 /// Регистрирует список команд для автодополнения в клиентах Telegram.
 /// Кириллические имена Bot API не принимает — идут только латинские.
+/// Буфер равен лимиту Bot API — 100 команд на setMyCommands.
 fn registerCommands(api: *tg.Api) void {
     const Entry = struct { command: []const u8, description: []const u8 };
-    var list: [64]Entry = undefined;
+    var list: [100]Entry = undefined;
     var n: usize = 0;
     outer: for (features.commands) |c| {
         for (c.name[1..]) |ch| {
@@ -431,7 +442,7 @@ fn printToday(alloc: std.mem.Allocator, cfg: config.Config) !void {
     try aw.writer.print("\n\n", .{});
     try f_mercury.writeStatus(now, cfg.tz_offset_sec, &aw.writer);
     try aw.writer.print("\n\n", .{});
-    try f_lunday.writeStatus(now, cfg.tz_offset_sec, &aw.writer);
+    try f_lunday.writeStatus(now, cfg.tz_offset_sec, f_lunday.observerOf(&cfg), &aw.writer);
 
     var out_buf: [8192]u8 = undefined;
     var w: std.Io.Writer = .fixed(&out_buf);
@@ -465,6 +476,9 @@ fn printUsage() !void {
         \\  MOONOBSRV_COMPOSE_PROJECT проект docker compose (moonobsrv)
         \\  MOONOBSRV_DATA_DIR       каталог состояния (по умолчанию «data»)
         \\  MOONOBSRV_TZ             часовой пояс вывода, часов: 3, -5, 5.5
+        \\  MOONOBSRV_LAT            широта места, градусы (55.75 — Москва)
+        \\  MOONOBSRV_LON            долгота места, градусы (37.62); нужны
+        \\                           восходам Луны — лунным суткам «от восхода»
         \\  MOONOBSRV_POLL_TIMEOUT   long polling, сек (25)
         \\  MOONOBSRV_CHECK_INTERVAL период проверки неба, сек (60)
         \\  MOONOBSRV_WEBHOOK_URL    публичный https-адрес webhook

@@ -11,9 +11,18 @@ const util = @import("../util.zig");
 const voc = astro.voc;
 
 /// Проценты печатаем целыми — форматирование дробных тянет за собой
-/// заметный кусок std.fmt в бинарнике.
+/// заметный кусок std.fmt в бинарнике. Потолок 99: пока Луна в знаке,
+/// «пройдено 100%» противоречило бы строке про будущую ингрессию.
 fn pct(x: f64) u32 {
-    return @intFromFloat(@max(0, x + 0.5));
+    return @intFromFloat(@min(@max(0, x + 0.5), 99));
+}
+
+test "pct: округление и потолок 99 (BUG-038)" {
+    try std.testing.expectEqual(@as(u32, 0), pct(-5));
+    try std.testing.expectEqual(@as(u32, 50), pct(50.4));
+    try std.testing.expectEqual(@as(u32, 51), pct(50.6));
+    try std.testing.expectEqual(@as(u32, 99), pct(99.2));
+    try std.testing.expectEqual(@as(u32, 99), pct(99.9)); // не 100 до ингрессии
 }
 
 fn cmdVoc(ctx: *router.Ctx) !void {
@@ -117,7 +126,7 @@ pub fn onTick(base: router.Base) !void {
         });
         try w.print("Можно снова браться за новые дела.", .{});
     }
-    var snap: [128]i64 = undefined;
+    var snap: [256]i64 = undefined;
     notify.broadcast(base.api, base.store.subsSnapshot(&snap), w.buffered());
 }
 

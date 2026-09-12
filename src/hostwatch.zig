@@ -193,6 +193,10 @@ fn diskPct() ?u8 {
         .argv = &.{ "df", "-P", "/" },
         .max_output_bytes = 4096,
     }) catch return null;
+    // вывод Child.run — во владение вызывающему: раз в минуту в цикле
+    // сторожа, без free это линейная утечка RSS
+    defer std.heap.page_allocator.free(out.stdout);
+    defer std.heap.page_allocator.free(out.stderr);
     if (out.term != .Exited) return null;
     const stdout = out.stdout;
     var it = std.mem.splitScalar(u8, stdout, '\n');
@@ -236,7 +240,8 @@ fn onAc() ?bool {
         var ob: [8]u8 = undefined;
         const on = of.readAll(&ob) catch continue;
         of.close();
-        return std.mem.trim(u8, ob[0..on], " \r\n")[0] == '1';
+        const online = std.mem.trim(u8, ob[0..on], " \r\n");
+        return if (online.len == 0) null else online[0] == '1'; // пустой файл — не падаем
     }
     return null;
 }

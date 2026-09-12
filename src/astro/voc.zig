@@ -121,8 +121,17 @@ pub fn assess(now_unix: i64, buf: *[max_aspects]AspectEvent) Status {
     var n: usize = 0;
     for (planets.classical) |body| {
         for (aspects.all) |asp| {
+            // Соединение (0°) и оппозиция (180°) симметричны: смещения +a и −a
+            // задают одну и ту же функцию (различие кратно 360°, wrap180 его
+            // съедает) — ищем однократно, иначе событие попадёт в список дважды.
             const a = asp.angleOf();
-            for ([2]f64{ a, -a }) |off| {
+            const offs: []const f64 = if (asp == .conjunction)
+                &[_]f64{0.0}
+            else if (asp == .opposition)
+                &[_]f64{180.0}
+            else
+                &[_]f64{ a, -a };
+            for (offs) |off| {
                 const f = SepFn{ .body = body, .offset = off };
                 var t = entered_jd;
                 while (t < ingress_jd) {

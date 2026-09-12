@@ -8,10 +8,17 @@
 //! в конфиге весь срок работы процесса.
 
 const std = @import("std");
+const log = @import("log.zig").log;
 
 /// Читает файл и применяет его к карте окружения. Отсутствие файла — норма.
 pub fn apply(alloc: std.mem.Allocator, env: *std.process.EnvMap, path: []const u8) void {
     const bytes = std.fs.cwd().readFileAlloc(alloc, path, 64 * 1024) catch return;
+    if (std.mem.startsWith(u8, bytes, "\xFF\xFE") or std.mem.startsWith(u8, bytes, "\xFE\xFF")) {
+        // PowerShell 5 `> .env` пишет UTF-16LE: строки не распарсятся, а
+        // ключ с мусорными байтами валидируется assert'ом EnvMap — пропускаем
+        log("env: {s} в UTF-16 — пересохраните в UTF-8 (без BOM или с UTF-8 BOM)", .{path});
+        return;
+    }
     parseInto(env, bytes);
 }
 
@@ -40,6 +47,9 @@ pub fn parseInto(env: *std.process.EnvMap, bytes_in: []const u8) void {
             val = val[1 .. val.len - 1];
         }
         if (key.len == 0) continue;
+        // EnvMap.get/put ассертят валидность WTF-8: битые байты (UTF-16 без
+        // BOM, обрезанный мультибайт) молча пропускаем, а не роняем процесс
+        if (!std.unicode.wtf8ValidateSlice(key) or !std.unicode.wtf8ValidateSlice(val)) continue;
         if (env.get(key) != null) continue; // реальное окружение приоритетнее
         env.put(key, val) catch {};
     }
@@ -51,6 +61,21 @@ test "parseInto: BOM от PowerShell не ломает первый ключ" {
     parseInto(&env, "\xEF\xBB\xBFMOONOBSRV_TZ=5\nTELEGRAM_TOKEN=t\n");
     try std.testing.expectEqualStrings("5", env.get("MOONOBSRV_TZ").?);
     try std.testing.expectEqualStrings("t", env.get("TELEGRAM_TOKEN").?);
+}
+
+test "parseInto: UTF-16 и битый UTF-8 не роняют процесс" {
+    var env = std.process.EnvMap.init(std.testing.allocator);
+    defer env.deinit();
+    // UTF-16LE с BOM («TELEGRAM_TOKEN=t»): пара 0A 00 даёт «строки» с
+    // нулями — раньше ключ уходил в EnvMap.get и ломал WTF-8 assert
+    const utf16 = "\xFF\xFET\x00E\x00L\x00E\x00G\x00R\x00A\x00M\x00_\x00T\x00O\x00K\x00E\x00N\x00=\x00t\x00\r\x00\n\x00";
+    parseInto(&env, utf16);
+    // обрезанный мультибайт в ключе и в значении — строки пропускаются
+    parseInto(&env, "\xC3=ok\nKEY=\xE2\x82\nFINE=1\n");
+    try std.testing.expectEqualStrings("1", env.get("FINE").?);
+    // невалидные не попали в карту: проверяем числом записей, а не get()
+    // (env.get сам ассертит валидность ключа — потому и падал прод)
+    try std.testing.expectEqual(@as(usize, 1), env.count());
 }
 
 test "parseInto: комментарии, кавычки, приоритет окружения" {

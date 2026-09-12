@@ -54,18 +54,27 @@ pub fn handleUnknown(ctx: *router.Ctx) !UnknownFlow {
     switch (ctx.base.store.statusOf(uid, &sbuf)) {
         .active => return .pass_through, // уже внутри — обычная обработка
         .denied => {
-            try ctx.reply.writeAll("Доступ отклонён.");
-            return .handled;
+            // После отказа бот молчит до следующего /start — тот создаёт
+            // повторную заявку (слайд «Доступ»: «повторная заявка: снова /start»).
+            if (!std.mem.eql(u8, ctx.cmd.name, "/start")) return .handled;
         },
         .pending => {
             try ctx.reply.writeAll("Заявка уже на рассмотрении. Ждите решения.");
             return .handled;
         },
+        // none — нового пользователя нет в whitelist (или БД не ответила):
+        // единственный путь, создающий заявку и карточку админу.
+        .none => {},
     }
 
     const notify = ctx.base.store.requestAccess(uid, ctx.from_label);
     if (!notify) {
-        try ctx.reply.writeAll("Заявка отправлена админу. Ждите решения.");
+        if (!ctx.base.store.db_ok) {
+            // заявка не записалась: БД недоступна — не врать про «отправлена»
+            try ctx.reply.writeAll("Сервис временно недоступен (нет связи с базой). Попробуйте позже.");
+        } else {
+            try ctx.reply.writeAll("Заявка отправлена админу. Ждите решения.");
+        }
         return .handled;
     }
 
@@ -77,7 +86,7 @@ pub fn handleUnknown(ctx: *router.Ctx) !UnknownFlow {
     try w.print("\nid: <code>{d}</code>\nсообщение:\n<code>", .{uid});
     var preview = ctx.raw_text;
     if (preview.len == 0) preview = "(без текста)";
-    if (preview.len > 200) preview = preview[0..200];
+    if (preview.len > 200) preview = cutUtf8(preview, 200);
     try htmlEscape(&w, preview);
     try w.writeAll("</code>");
     var kb: [256]u8 = undefined;
@@ -110,8 +119,7 @@ pub fn onAclCallback(base: router.Base, cb_id: []const u8, from_id: i64, data: [
         api.answerCallbackQuery(cb_id, "Неверный id", true);
         return true;
     }
-    const id_str = body[if (allow) 6 else 4 ..];
-    const uid = std.fmt.parseInt(i64, id_str, 10) catch {
+    const uid = parseAclId(body, allow) orelse {
         api.answerCallbackQuery(cb_id, "Неверный id", true);
         return true;
     };
@@ -140,6 +148,43 @@ pub fn onAclCallback(base: router.Base, cb_id: []const u8, from_id: i64, data: [
 }
 
 // ─── Тесты ──────────────────────────────────────────────────────────────────
+
+/// Id из тела колбэка: «allow:123» / «deny:456». «allow:» — 6 символов,
+/// «deny:» — 5 (off-by-one здесь ломал кнопку «Отклонить», BUG-020).
+fn parseAclId(body: []const u8, allow: bool) ?i64 {
+    const id_str = body[if (allow) "allow:".len else "deny:".len ..];
+    return std.fmt.parseInt(i64, id_str, 10) catch null;
+}
+
+/// Подрезка до max байт с выравниванием на границу UTF-8 — иначе карточка
+/// заявки уйдёт с разрезанной руной и Telegram отклонит сообщение (BUG-033).
+fn cutUtf8(s: []const u8, max: usize) []const u8 {
+    if (s.len <= max) return s;
+    var cut = max;
+    while (cut > 0 and (s[cut] & 0xC0) == 0x80) cut -= 1;
+    return s[0..cut];
+}
+
+test "parseAclId: allow и deny (BUG-020)" {
+    try std.testing.expectEqual(@as(?i64, 123456), parseAclId("allow:123456", true));
+    try std.testing.expectEqual(@as(?i64, 123456), parseAclId("deny:123456", false));
+    try std.testing.expectEqual(@as(?i64, null), parseAclId("deny:", false)); // пустой id
+    try std.testing.expectEqual(@as(?i64, null), parseAclId("deny:abc", false));
+    try std.testing.expectEqual(@as(?i64, -100200300400500), parseAclId("deny:-100200300400500", false));
+}
+
+test "cutUtf8: граница руны (BUG-033)" {
+    // 105 кириллических рун по 2 байта = 210 байт; 200 попадает на границу руны
+    const s = "а" ** 105;
+    const cut = cutUtf8(s, 200);
+    try std.testing.expectEqual(@as(usize, 200), cut.len);
+    try std.testing.expectEqualStrings(s[0..200], cut);
+    // 201 попадает в середину руны → откат к 200 (чётной границе)
+    const cut2 = cutUtf8(s, 201);
+    try std.testing.expectEqual(@as(usize, 200), cut2.len);
+    // короткая строка не трогается
+    try std.testing.expectEqualStrings("абв", cutUtf8("абв", 200));
+}
 
 test "displayLabel: username > имя > id" {
     var b: [64]u8 = undefined;

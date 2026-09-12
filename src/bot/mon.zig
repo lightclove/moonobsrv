@@ -61,8 +61,9 @@ pub fn fmtMonitor(w: *std.Io.Writer, inp: MonitorIn) !void {
     const dt = util.civilFromUnix(inp.now, inp.off);
     try w.print("📊 <b>Слои moonobsrv</b>\nна {d:0>2}.{d:0>2}.{d} {s}\n\n", .{ dt.d, dt.mo, @as(u32, @intCast(dt.y)), util.fmtClock(&buf, inp.now, inp.off) });
 
-    var dbuf: [32]u8 = undefined;
-    try w.print("• процесс — OK · жив {s} · heartbeat {s} назад\n", .{ util.fmtDur(&dbuf, inp.now - inp.started), util.fmtDur(&dbuf, inp.hb_age) });
+    var dur_up: [32]u8 = undefined;
+    var dur_hb: [32]u8 = undefined;
+    try w.print("• процесс — OK · жив {s} · heartbeat {s} назад\n", .{ util.fmtDur(&dur_up, inp.now - inp.started), util.fmtDur(&dur_hb, inp.hb_age) });
     try w.print("• postgres — {s}\n", .{okFail(inp.db_mode and inp.db_ok)});
     try w.print("• telegram — {s}\n", .{okFail(inp.tg_ok)});
     if (inp.tor_configured) {
@@ -255,6 +256,8 @@ pub const Stat = struct {
     incidents: u32 = 0,
     spans: [16]struct { from: i64, to: i64 } = undefined,
     span_n: usize = 0,
+    /// Слитые промежутки сверх ёмкости spans — чтобы «… ещё N» не врало.
+    spans_lost: usize = 0,
 
     fn addSpan(self: *Stat, from: i64, to: i64) void {
         if (self.span_n > 0 and self.spans[self.span_n - 1].to == from) {
@@ -262,6 +265,8 @@ pub const Stat = struct {
         } else if (self.span_n < self.spans.len) {
             self.spans[self.span_n] = .{ .from = from, .to = to };
             self.span_n += 1;
+        } else {
+            self.spans_lost += 1;
         }
     }
 };
@@ -285,9 +290,11 @@ pub fn computeStats(samples: []const wd.Sample, from: i64, to: i64) LayerStats {
         st.proc.down = to - from;
         return st;
     }
-    // ведущий гэп
+    // ведущий гэп: и в сумму, и в список промежутков (иначе расшифровка
+    // неполна — админ не видит, когда именно висело)
     if (samples[0].ts - from > GAP_SECS) {
         st.proc.down += samples[0].ts - from;
+        st.proc.addSpan(from, samples[0].ts);
     }
     var i: usize = 1;
     while (i < samples.len) : (i += 1) {
@@ -337,12 +344,13 @@ pub fn fmtIdle(w: *std.Io.Writer, kind: IdleKind, now: i64, off: i32, samples: [
     const win = winRange(kind, now, off);
     var fbuf: [64]u8 = undefined;
     var tbuf: [64]u8 = undefined;
+    var sbuf: [64]u8 = undefined;
     try w.print("⏱ <b>Простой слоёв · {s}</b>\nокно: {s} — {s}\nснимков: {d} · длина {s}\n\n", .{
         win.label,
         fmtDateTimeLocal(&fbuf, win.from, off, now),
         util.fmtClock(&tbuf, win.to, off),
         samples.len,
-        fmtSpan(&fbuf, win.to - win.from),
+        fmtSpan(&sbuf, win.to - win.from),
     });
 
     if (samples.len == 0) {
@@ -363,7 +371,7 @@ pub fn fmtIdle(w: *std.Io.Writer, kind: IdleKind, now: i64, off: i32, samples: [
 }
 
 fn writeLayerLine(w: *std.Io.Writer, name: []const u8, s: Stat, denom: i64, buf: []u8, show_spans: bool, off: i32) !void {
-    if (s.obs == 0 and s.down == 0 and denom == 0) {
+    if (s.obs == 0 and s.down == 0) {
         try w.print("• {s} — нет данных\n", .{name});
         return;
     }
@@ -389,7 +397,8 @@ fn writeLayerLine(w: *std.Io.Writer, name: []const u8, s: Stat, denom: i64, buf:
             });
         }
         if (s.span_n > IDLE_SPANS_SHOW) {
-            try w.print("  … ещё {d}\n", .{s.span_n - IDLE_SPANS_SHOW});
+            // плюс потерянные сверх ёмкости — иначе счётчик занижен
+            try w.print("  … ещё {d}\n", .{s.span_n - IDLE_SPANS_SHOW + s.spans_lost});
         }
     }
 }
@@ -528,7 +537,7 @@ test "fmtMonitor: структура отчёта" {
         .cpu_temp = 52,
         .ac = true,
         .sshd = true,
-        .hb_age = 5,
+        .hb_age = 300,
     });
     const s = w.buffered();
     try std.testing.expect(std.mem.indexOf(u8, s, "Слои moonobsrv") != null);
@@ -540,6 +549,9 @@ test "fmtMonitor: структура отчёта" {
     try std.testing.expect(std.mem.indexOf(u8, s, "52°C") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "питание — адаптер") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "/hardreset") != null);
+    // BUG-022: аптайм не затирается возрастом heartbeat (было «жив 5 мин»)
+    try std.testing.expect(std.mem.indexOf(u8, s, "жив 2 ч") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "heartbeat 5 мин назад") != null);
 }
 
 test "fmtSpan" {
@@ -550,4 +562,65 @@ test "fmtSpan" {
     try std.testing.expectEqualStrings("3 ч 5 мин", fmtSpan(&b, 11100));
     try std.testing.expectEqualStrings("2 д", fmtSpan(&b, 172800));
     try std.testing.expectEqualStrings("2 д 3 ч", fmtSpan(&b, 183600));
+}
+
+test "computeStats: ведущий гэп попадает и в сумму, и в список (BUG-029)" {
+    const full = BIT_PG | BIT_TG | BIT_TOR | BIT_WAN | BIT_DOCKER | BIT_DISK;
+    var samples: [1]wd.Sample = undefined;
+    samples[0] = .{ .ts = 1600, .mask = full };
+    const st = computeStats(&samples, 1000, 2000);
+    // ведущий 1000→1600 и хвостовой 1600→2000 — оба гэпы, сливаются в один
+    try std.testing.expectEqual(@as(i64, 1000), st.proc.down);
+    try std.testing.expectEqual(@as(usize, 1), st.proc.span_n);
+    try std.testing.expectEqual(@as(i64, 1000), st.proc.spans[0].from);
+    try std.testing.expectEqual(@as(i64, 2000), st.proc.spans[0].to);
+}
+
+test "computeStats: слой без наблюдений — spans_lost честно считает (BUG-030)" {
+    // 20 разделённых гэпов по 260 с (между ними живые интервалы по 60 с):
+    // 16 влезают в массив, 4 теряются — счётчик потерь не даст соврать
+    const full = BIT_PG | BIT_TG;
+    var samples: [42]wd.Sample = undefined;
+    var t: i64 = 0;
+    var idx: usize = 0;
+    for (0..21) |_| {
+        samples[idx] = .{ .ts = t, .mask = full };
+        idx += 1;
+        t += 60; // живой интервал
+        samples[idx] = .{ .ts = t, .mask = full };
+        idx += 1;
+        t += 260; // гэп до следующей пары
+    }
+    const st = computeStats(&samples, 0, t - 260);
+    try std.testing.expectEqual(@as(usize, 16), st.proc.span_n);
+    try std.testing.expectEqual(@as(usize, 4), st.proc.spans_lost);
+    try std.testing.expectEqual(@as(i64, 20 * 260), st.proc.down);
+}
+
+test "fmtIdle: шапка с датой начала и длиной окна без наложения (BUG-023), слой без данных (BUG-028)" {
+    const off: i32 = 3 * 3600;
+    // окно 12 ч, два сэмпла с гэпом 600 с в середине — начало окна наблюдаемо,
+    // середина нет: у слоя postgres строка «нет данных» невозможна (obs>0),
+    // а процесс имеет простой; шапка обязана содержать дату и длину
+    const now = util_days(2026, 9, 9) * 86400 + 14 * 3600 + 30 * 60 - off;
+    const full = BIT_PG | BIT_TG | BIT_TOR | BIT_WAN | BIT_DOCKER | BIT_DISK;
+    var samples: [3]wd.Sample = undefined;
+    samples[0] = .{ .ts = now - 11 * 3600, .mask = full };
+    samples[1] = .{ .ts = now - 10 * 3600, .mask = full };
+    samples[2] = .{ .ts = now - 9 * 3600, .mask = full };
+    var buf: [4096]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try fmtIdle(&w, .{ .hours = 12 }, now, off, &samples);
+    const s = w.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, s, "окно: 09.09.2026 02:30 — 14:30") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "длина 12 ч") != null);
+    // все интервалы — гэпы: слои не наблюдались → «нет данных», не «0 · 100%»
+    var w2buf: [4096]u8 = undefined;
+    var w2: std.Io.Writer = .fixed(&w2buf);
+    var gapy: [2]wd.Sample = undefined;
+    gapy[0] = .{ .ts = now - 3600, .mask = full };
+    gapy[1] = .{ .ts = now - 1800, .mask = full };
+    try fmtIdle(&w2, .{ .hours = 2 }, now, off, &gapy);
+    try std.testing.expect(std.mem.indexOf(u8, w2.buffered(), "postgres — нет данных") != null);
+    try std.testing.expect(std.mem.indexOf(u8, w2.buffered(), "0 · 100%") == null);
 }

@@ -62,7 +62,7 @@ pub fn handle(base: router.Base, cb_id: []const u8, from_id: i64, chat_id: ?i64,
         return true;
     }
     if (std.mem.eql(u8, data, "menu:main") or std.mem.startsWith(u8, data, "menu:")) {
-        onMenu(base, cb_id, chat_id, message_id, data);
+        onMenu(base, cb_id, chat_id, message_id, data, admin);
         return true;
     }
     api.answerCallbackQuery(cb_id, "", false); // неизвестный — просто гасим часики
@@ -85,12 +85,12 @@ fn showToc(base: router.Base, cb_id: []const u8, chat_id: ?i64, message_id: ?i64
 }
 
 /// menu:main — список быстрых команд; menu:cmd:<имя> — исполнить команду.
-fn onMenu(base: router.Base, cb_id: []const u8, chat_id: ?i64, message_id: ?i64, data: []const u8) void {
+fn onMenu(base: router.Base, cb_id: []const u8, chat_id: ?i64, message_id: ?i64, data: []const u8, admin: bool) void {
     const api = base.api;
     if (std.mem.eql(u8, data, "menu:main")) {
         var buf: [2048]u8 = undefined;
         var w: std.Io.Writer = .fixed(&buf);
-        wizard.helpText(&w, false) catch {};
+        wizard.helpText(&w, admin) catch {};
         var kb: [512]u8 = undefined;
         var kw: std.Io.Writer = .fixed(&kb);
         menuKb(&kw) catch {};

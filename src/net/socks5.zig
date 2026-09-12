@@ -12,24 +12,41 @@ pub fn methodOk(reply: []const u8) bool {
     return reply.len >= 2 and reply[0] == 0x05 and reply[1] == 0x00;
 }
 
-/// Запрос CONNECT: VER CMD RSV ATYP=3 LEN DOMAIN PORT(BE).
-/// Буфер 262 байта хватает на домен 255 + служебные.
-pub fn buildConnect(buf: []u8, host: []const u8, port: u16) []const u8 {
-    std.debug.assert(buf.len >= 7 + host.len);
+/// Запрос CONNECT: VER CMD RSV ATYP ADDR PORT(BE).
+/// null — домен длиннее 255 (лимит байта длины) или пуст.
+/// IPv6-литерал кодируется ATYP=0x04 (RFC 1928; скобки из URL уже сняты
+/// config.parseSocks), домен — ATYP=0x03 (socks5h: DNS резолвит прокси).
+pub fn buildConnect(buf: []u8, host: []const u8, port: u16) ?[]const u8 {
+    if (host.len == 0) return null;
+    if (std.net.Address.parseIp(host, port)) |addr| {
+        if (addr.any.family == std.posix.AF.INET6) {
+            if (buf.len < 4 + 16 + 2) return null;
+            buf[0] = 0x05; // VER
+            buf[1] = 0x01; // CMD: CONNECT
+            buf[2] = 0x00; // RSV
+            buf[3] = 0x04; // ATYP: IPv6
+            @memcpy(buf[4..20], addr.in6.sa.addr[0..16]);
+            std.mem.writeInt(u16, buf[20..22], port, .big);
+            return buf[0..22];
+        }
+    } else |_| {}
+    if (host.len > 255) return null;
+    if (buf.len < 7 + host.len) return null;
     buf[0] = 0x05; // VER
     buf[1] = 0x01; // CMD: CONNECT
     buf[2] = 0x00; // RSV
     buf[3] = 0x03; // ATYP: домен
-    buf[4] = @intCast(@min(host.len, 255));
+    buf[4] = @intCast(host.len);
     @memcpy(buf[5 .. 5 + host.len], host);
     std.mem.writeInt(u16, buf[5 + host.len ..][0..2], port, .big);
     return buf[0 .. 7 + host.len];
 }
 
-pub const ConnectResult = enum { ok, refused, denied, host_unreachable, ttl, cmd_not_supported, addr_not_supported, generic_fail };
+pub const ConnectResult = enum { ok, refused, denied, network_unreachable, host_unreachable, ttl, cmd_not_supported, addr_not_supported, generic_fail };
 
 /// Ответ сервера: VER REP RSV ATYP BND.ADDR BND.PORT. Возвращает null,
 /// если данных ещё меньше минимальных 10 байт (ATYP=1) — доли кадра.
+/// Коды REP — по RFC 1928.
 pub fn parseReply(data: []const u8) ?ConnectResult {
     if (data.len < 4 or data[0] != 0x05) return null;
     const full = switch (data[3]) {
@@ -41,11 +58,12 @@ pub fn parseReply(data: []const u8) ?ConnectResult {
     if (!full) return null;
     return switch (data[1]) {
         0x00 => .ok,
-        0x01 => .generic_fail,
-        0x02 => .denied,
-        0x03 => .host_unreachable,
-        0x04 => .refused,
-        0x05 => .ttl,
+        0x01 => .generic_fail, // general SOCKS server failure
+        0x02 => .denied, // connection not allowed by ruleset
+        0x03 => .network_unreachable,
+        0x04 => .host_unreachable,
+        0x05 => .refused,
+        0x06 => .ttl,
         0x07 => .cmd_not_supported,
         0x08 => .addr_not_supported,
         else => .generic_fail,
@@ -70,7 +88,7 @@ pub fn handshake(stream: std.net.Stream, host: []const u8, port: u16) !void {
     if (!methodOk(&mbuf)) return error.SocksNoAcceptableAuth;
 
     var cbuf: [7 + 255]u8 = undefined;
-    try wi.writeAll(buildConnect(&cbuf, host, port));
+    try wi.writeAll(buildConnect(&cbuf, host, port) orelse return error.SocksBadHost);
     try wi.flush();
 
     // Ответ ≤ 262 байт (ATYP=3 с доменом 255); копим по байту, пока кадр
@@ -101,7 +119,7 @@ test "кадры: приветствие и выбор метода" {
 
 test "кадры: CONNECT собирается байт-в-байт" {
     var buf: [262]u8 = undefined;
-    const req = buildConnect(&buf, "api.telegram.org", 443);
+    const req = buildConnect(&buf, "api.telegram.org", 443).?;
     const expect = [_]u8{
         0x05, 0x01, 0x00, 0x03, 16, 'a', 'p', 'i', '.', 't', 'e', 'l', 'e',
         'g', 'r', 'a', 'm', '.', 'o', 'r', 'g', 0x01, 0xBB,
@@ -109,11 +127,34 @@ test "кадры: CONNECT собирается байт-в-байт" {
     try std.testing.expectEqualSlices(u8, &expect, req);
 }
 
-test "кадры: разбор ответа CONNECT" {
+test "кадры: домен вне лимита протокола — null, не UB" {
+    var buf: [7 + 255]u8 = undefined;
+    const host = "a" ** 300;
+    try std.testing.expect(buildConnect(&buf, host, 443) == null);
+    try std.testing.expect(buildConnect(&buf, "", 443) == null);
+    // короткий буфер — тоже null
+    var small: [8]u8 = undefined;
+    try std.testing.expect(buildConnect(&small, "example.org", 443) == null);
+}
+
+test "кадры: IPv6-литерал — ATYP=4 (RFC 1928)" {
+    var buf: [64]u8 = undefined;
+    const req = buildConnect(&buf, "::1", 443).?;
+    try std.testing.expectEqual(@as(usize, 22), req.len);
+    try std.testing.expectEqual(@as(u8, 0x04), req[3]);
+    for (req[4..19]) |b| try std.testing.expectEqual(@as(u8, 0), b); // первые 15 байт ::1
+    try std.testing.expectEqual(@as(u8, 1), req[19]); // 16-й байт ::1
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x01, 0xBB }, req[20..22]);
+}
+
+test "кадры: разбор ответа CONNECT (REP по RFC 1928)" {
     // REP=0, ATYP=1, addr 0.0.0.0, port 0
     try std.testing.expectEqual(ConnectResult.ok, parseReply(&.{ 0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0 }).?);
-    // REP=4 (refused)
-    try std.testing.expectEqual(ConnectResult.refused, parseReply(&.{ 0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0 }).?);
+    // REP=3 network unreachable, REP=4 host unreachable, REP=5 refused, REP=6 TTL
+    try std.testing.expectEqual(ConnectResult.network_unreachable, parseReply(&.{ 0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0 }).?);
+    try std.testing.expectEqual(ConnectResult.host_unreachable, parseReply(&.{ 0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0 }).?);
+    try std.testing.expectEqual(ConnectResult.refused, parseReply(&.{ 0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0 }).?);
+    try std.testing.expectEqual(ConnectResult.ttl, parseReply(&.{ 0x05, 0x06, 0x00, 0x01, 0, 0, 0, 0, 0, 0 }).?);
     // REP=1 generic
     try std.testing.expectEqual(ConnectResult.generic_fail, parseReply(&.{ 0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0 }).?);
     // ATYP=3 домен: неполный кадр → null, полный → ok

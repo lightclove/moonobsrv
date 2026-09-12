@@ -11,6 +11,9 @@ const https = @import("../net/https.zig");
 const config = @import("../config.zig");
 
 const api_host = "api.telegram.org";
+// Один список апдейтов для polling и webhook: без callback_query в webhook-
+// режиме молча умирают все кнопки (гид, меню, заявки).
+const allowed_updates_list = [_][]const u8{ "message", "callback_query" };
 const allowed_updates_enc = "%5B%22message%22%2C%22callback_query%22%5D"; // ["message","callback_query"]
 
 pub const From = struct {
@@ -212,7 +215,7 @@ pub const Api = struct {
         const body = try std.json.Stringify.valueAlloc(self.allocator, .{
             .url = url,
             .secret_token = if (secret.len > 0) secret else null,
-            .allowed_updates = [_][]const u8{"message"},
+            .allowed_updates = allowed_updates_list,
             .drop_pending_updates = false,
         }, .{});
         defer self.allocator.free(body);
@@ -327,4 +330,12 @@ test "parseUpdates: строки живут в арены вызывающего
 test "конфликт 409 ищется в теле ответа" {
     const body = "{\"ok\":false,\"error_code\":409,\"description\":\"Conflict: terminated by other getUpdates request\"}";
     try std.testing.expect(std.mem.indexOf(u8, body, "\"error_code\":409") != null);
+}
+
+test "webhook подписан и на callback_query (BUG-021)" {
+    try std.testing.expectEqual(@as(usize, 2), allowed_updates_list.len);
+    try std.testing.expectEqualStrings("message", allowed_updates_list[0]);
+    try std.testing.expectEqualStrings("callback_query", allowed_updates_list[1]);
+    // и кодированная форма для getUpdates соответствует тому же списку
+    try std.testing.expect(std.mem.indexOf(u8, allowed_updates_enc, "callback_query") != null);
 }

@@ -43,7 +43,7 @@ fn cmdStatus(ctx: *router.Ctx) !void {
     try ctx.reply.print("🛰 moonobsrv v{s}\n", .{runtime.version});
     try ctx.reply.print("Ваш id: {d}\n", .{ctx.chat_id});
     try ctx.reply.print("Аптайм: {s}\n", .{util.fmtDur(&b_dur, uptime)});
-    try ctx.reply.print("Подписчиков: {d}\n", .{ctx.base.store.subs.items.len});
+    try ctx.reply.print("Подписчиков: {d}\n", .{ctx.base.store.subsCount()});
     try ctx.reply.print("Проверка неба: каждые {d} с\n", .{ctx.base.cfg.check_interval_s});
     try ctx.reply.print("Часовой пояс вывода: {s}", .{util.tzLabel(&b_tz, ctx.base.cfg.tz_offset_sec)});
 }
@@ -52,7 +52,7 @@ fn cmdSubscribe(ctx: *router.Ctx) !void {
     ctx.base.store.addSub(ctx.chat_id) catch {
         return ctx.reply.print("⚠ Не удалось сохранить подписку, попробуйте позже.", .{});
     };
-    try ctx.reply.print("🔔 Подписка оформлена.\nБуду присылать: начало и конец холостой Луны, станции Меркурия, начало лунных дней.\nОтписка: /unsubscribe", .{});
+    try ctx.reply.print("🔔 Подписка оформлена.\nБуду присылать: начало и конец холостой Луны, станции Меркурия и других планет, начало лунных дней.\nОтписка: /unsubscribe", .{});
 }
 
 fn cmdUnsubscribe(ctx: *router.Ctx) !void {

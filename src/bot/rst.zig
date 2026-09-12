@@ -111,7 +111,9 @@ pub fn planRestart(t: Target, started: i64, msg_date: i64, bounce_age: ?i64) Res
 }
 
 pub fn skipRepeat(started: i64, msg_date: i64, bounce_age: ?i64) bool {
-    if (msg_date > 0) return msg_date < started;
+    // replay: команда отправлена до старта текущего процесса
+    if (msg_date > 0 and msg_date < started) return true;
+    // кулдаун: рестарт уже был недавно — и для авто-Tor, и для команд админа
     if (bounce_age) |age| return age < wd.TOR_RESTART_COOLDOWN_S;
     return false;
 }
@@ -327,9 +329,13 @@ test "planRestart: replay и cooldown" {
     try std.testing.expectEqual(@as(std.meta.Tag(RestartPlan), .skip_stale), @as(std.meta.Tag(RestartPlan), planRestart(.all, 1000, 500, null)));
     // свежий рестарт был 10 с назад, даты нет — скип
     try std.testing.expectEqual(@as(std.meta.Tag(RestartPlan), .skip_stale), @as(std.meta.Tag(RestartPlan), planRestart(.tor, 1000, 0, 10)));
+    // BUG-036: кулдаун работает и у свежей команды админа (msg_date > started)
+    try std.testing.expectEqual(@as(std.meta.Tag(RestartPlan), .skip_stale), @as(std.meta.Tag(RestartPlan), planRestart(.tor, 1000, 2000, 10)));
     // давно — работаем
     const p = planRestart(.tor, 1000, 0, 500);
     try std.testing.expect(p == .bounce);
+    const p2 = planRestart(.tor, 1000, 2000, 500);
+    try std.testing.expect(p2 == .bounce);
     // не процесс — только ответ
     try std.testing.expect(planRestart(.wan, 1000, 0, null) == .reply_only);
 }

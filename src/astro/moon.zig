@@ -1,10 +1,31 @@
 //! Эклиптическая долгота Луны: усечённый ряд ELP2000 (Meeus, гл. 47, табл. 45.A,
 //! старшие ~58 членов). Точность ~0.05° — минуты для моментов аспектов и ингрессий.
 //! Значение непрерывно (не заворачивается) — долгота строго растёт.
+//! Широта — 8 старших членов того же ряда (Σb), ±0.05°: нужна восходам Луны.
 
 const ang = @import("angles.zig");
 
 const Term = struct { d: i8, m: i8, mp: i8, f: i8, c: f64 };
+
+/// Фундаментальные аргументы ряда (Meeus 47.1–47.5), градусы; T — юлианские
+/// столетия от J2000. Не заворачиваются: синусам это не важно, а lp растёт.
+pub const Args = struct { lp: f64, d: f64, m: f64, mp: f64, f: f64, e: f64 };
+
+pub fn fundamentals(jd: f64) Args {
+    const T = (jd - 2451545.0) / 36525.0;
+    return .{
+        .lp = 218.3164477 + 481267.88123421 * T - 0.0015786 * T * T +
+            T * T * T / 538841.0 - T * T * T * T / 65194000.0,
+        .d = 297.8501921 + 445267.1114034 * T - 0.0018819 * T * T +
+            T * T * T / 545868.0 - T * T * T * T / 113065000.0,
+        .m = 357.5291092 + 35999.0502909 * T - 0.0001536 * T * T + T * T * T / 24490000.0,
+        .mp = 134.9633964 + 477198.8675055 * T + 0.0087414 * T * T +
+            T * T * T / 69699.0 - T * T * T * T / 14712000.0,
+        .f = 93.2720950 + 483202.0175233 * T - 0.0036539 * T * T -
+            T * T * T / 3526000.0 + T * T * T * T / 863310000.0,
+        .e = 1.0 - 0.002516 * T - 0.0000074 * T * T,
+    };
+}
 
 // Множители при D, M, M', F и коэффициент при sin (10^-6 градусов).
 const terms = [_]Term{
@@ -71,27 +92,44 @@ const terms = [_]Term{
 
 /// Непрерывная (невернутая) эклиптическая долгота Луны в градусах.
 pub fn longitudeRaw(jd: f64) f64 {
-    const T = (jd - 2451545.0) / 36525.0;
-    const lp = 218.3164477 + 481267.88123421 * T - 0.0015786 * T * T +
-        T * T * T / 538841.0 - T * T * T * T / 65194000.0;
-    const D = 297.8501921 + 445267.1114034 * T - 0.0018819 * T * T +
-        T * T * T / 545868.0 - T * T * T * T / 113065000.0;
-    const M = 357.5291092 + 35999.0502909 * T - 0.0001536 * T * T + T * T * T / 24490000.0;
-    const Mp = 134.9633964 + 477198.8675055 * T + 0.0087414 * T * T +
-        T * T * T / 69699.0 - T * T * T * T / 14712000.0;
-    const F = 93.2720950 + 483202.0175233 * T - 0.0036539 * T * T -
-        T * T * T / 3526000.0 + T * T * T * T / 863310000.0;
-    const E = 1.0 - 0.002516 * T - 0.0000074 * T * T;
-
+    const a = fundamentals(jd);
     var sum: f64 = 0.0;
     for (terms) |t| {
-        const arg = @as(f64, @floatFromInt(t.d)) * D +
-            @as(f64, @floatFromInt(t.m)) * M +
-            @as(f64, @floatFromInt(t.mp)) * Mp +
-            @as(f64, @floatFromInt(t.f)) * F;
+        const arg = @as(f64, @floatFromInt(t.d)) * a.d +
+            @as(f64, @floatFromInt(t.m)) * a.m +
+            @as(f64, @floatFromInt(t.mp)) * a.mp +
+            @as(f64, @floatFromInt(t.f)) * a.f;
         const am = @abs(@as(f64, @floatFromInt(t.m)));
-        const ecc = if (am < 0.5) 1.0 else if (am < 1.5) E else E * E;
+        const ecc = if (am < 0.5) 1.0 else if (am < 1.5) a.e else a.e * a.e;
         sum += t.c * ecc * ang.sinD(arg);
     }
-    return lp + sum / 1.0e6;
+    return a.lp + sum / 1.0e6;
+}
+
+// Широта: множители при D, M', F и коэффициент при sin (10^-6 градусов);
+// членов с M среди старших нет — множитель E не нужен.
+const LatTerm = struct { d: i8, mp: i8, f: i8, c: f64 };
+
+const lat_terms = [_]LatTerm{
+    .{ .d = 0, .mp = 0, .f = 1, .c = 5128122 },
+    .{ .d = 0, .mp = 1, .f = 1, .c = 280602 },
+    .{ .d = 0, .mp = 1, .f = -1, .c = 277693 },
+    .{ .d = 2, .mp = 0, .f = -1, .c = 173237 },
+    .{ .d = 2, .mp = -1, .f = 1, .c = 55413 },
+    .{ .d = 2, .mp = -1, .f = -1, .c = 46271 },
+    .{ .d = 2, .mp = 0, .f = 1, .c = 32573 },
+    .{ .d = 0, .mp = 2, .f = 1, .c = 17198 },
+};
+
+/// Эклиптическая широта Луны в градусах (±5.3°).
+pub fn latitude(jd: f64) f64 {
+    const a = fundamentals(jd);
+    var sum: f64 = 0.0;
+    for (lat_terms) |t| {
+        const arg = @as(f64, @floatFromInt(t.d)) * a.d +
+            @as(f64, @floatFromInt(t.mp)) * a.mp +
+            @as(f64, @floatFromInt(t.f)) * a.f;
+        sum += t.c * ang.sinD(arg);
+    }
+    return sum / 1.0e6;
 }

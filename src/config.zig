@@ -15,6 +15,10 @@
 //!                            /restart*), по умолчанию «moonobsrv»
 //! MOONOBSRV_DATA_DIR       — каталог состояния (по умолчанию «data»)
 //! MOONOBSRV_TZ             — часовой пояс вывода в часах, напр. 3, -5, 5.5
+//! MOONOBSRV_LAT            — широта наблюдателя, градусы (юг — минус); 55.75
+//! MOONOBSRV_LON            — долгота наблюдателя, градусы (запад — минус); 37.62
+//!                            Место нужно восходам Луны — лунным суткам
+//!                            «от восхода до восхода»; по умолчанию Москва
 //! MOONOBSRV_POLL_TIMEOUT   — таймаут long polling, сек (25)
 //! MOONOBSRV_CHECK_INTERVAL — период проверки неба, сек (60)
 //! MOONOBSRV_WEBHOOK_URL    — публичный https-адрес webhook (задан → режим webhook)
@@ -38,6 +42,9 @@ pub const Config = struct {
     compose_project: []const u8 = "moonobsrv",
     data_dir: []const u8 = "data",
     tz_offset_sec: i32 = 3 * 3600,
+    /// Место наблюдателя для восходов Луны (лунные сутки «от восхода»); Москва.
+    lat_deg: f64 = 55.75,
+    lon_deg: f64 = 37.62,
     poll_timeout_s: u32 = 25,
     check_interval_s: u32 = 60,
     /// Задан → webhook-режим: регистрируем webhook и слушаем HTTP.
@@ -96,6 +103,14 @@ pub const Config = struct {
             const hours = std.fmt.parseFloat(f64, v) catch 3.0;
             cfg.tz_offset_sec = @intFromFloat(hours * 3600.0);
         }
+        if (env.get("MOONOBSRV_LAT")) |v| {
+            const lat = std.fmt.parseFloat(f64, std.mem.trim(u8, v, " \t")) catch cfg.lat_deg;
+            if (lat >= -90.0 and lat <= 90.0) cfg.lat_deg = lat;
+        }
+        if (env.get("MOONOBSRV_LON")) |v| {
+            const lon = std.fmt.parseFloat(f64, std.mem.trim(u8, v, " \t")) catch cfg.lon_deg;
+            if (lon >= -180.0 and lon <= 180.0) cfg.lon_deg = lon;
+        }
         if (env.get("MOONOBSRV_POLL_TIMEOUT")) |v| {
             cfg.poll_timeout_s = std.fmt.parseInt(u32, v, 10) catch cfg.poll_timeout_s;
         }
@@ -117,6 +132,7 @@ pub const Config = struct {
 
 /// Разбирает «socks5://host:port» / «socks5h://host:port» (регистр не важен).
 /// user:pass@ отбрасывается (Tor без аутентификации), путь отбрасывается.
+/// IPv6-литерал в скобках («[::1]:9050») разбирается без скобок.
 pub fn parseSocks(raw_in: []const u8) ?Config.Socks {
     var raw = raw_in;
     const scheme_sep = std.mem.indexOf(u8, raw, "://") orelse return null;
@@ -126,8 +142,13 @@ pub fn parseSocks(raw_in: []const u8) ?Config.Socks {
     if (std.mem.indexOfScalar(u8, raw, '/')) |i| raw = raw[0..i];
     if (std.mem.lastIndexOfScalar(u8, raw, '@')) |i| raw = raw[i + 1 ..];
     const colon = std.mem.lastIndexOfScalar(u8, raw, ':') orelse return null;
-    const host = raw[0..colon];
+    var host = raw[0..colon];
     const port = std.fmt.parseInt(u16, raw[colon + 1 ..], 10) catch return null;
+    // RFC 3986: IPv6-литерал в скобках; со скобками хост не парсится ни
+    // parseIp, ни getaddrinfo — прокси был бы «мёртв» всегда
+    if (host.len >= 2 and host[0] == '[' and host[host.len - 1] == ']') {
+        host = host[1 .. host.len - 1];
+    }
     if (host.len == 0 or port == 0) return null;
     return .{ .host = host, .port = port, .remote_dns = true };
 }
@@ -143,6 +164,10 @@ test "parseSocks: схемы, регистр, креды, мусор" {
     const with_creds = parseSocks("socks5://user:pass@tor:9050/path");
     try std.testing.expectEqualStrings("tor", with_creds.?.host);
     try std.testing.expectEqual(@as(u16, 9050), with_creds.?.port);
+    // IPv6-литерал: скобки снимаются, хост парсится (BUG-059)
+    const v6 = parseSocks("socks5://[::1]:9050").?;
+    try std.testing.expectEqualStrings("::1", v6.host);
+    _ = try std.net.Address.parseIp(v6.host, v6.port);
     try std.testing.expect(parseSocks("http://proxy:8080") == null);
     try std.testing.expect(parseSocks("socks5://tor") == null);
     try std.testing.expect(parseSocks("socks5://tor:0") == null);

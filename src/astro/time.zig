@@ -15,6 +15,13 @@ pub fn centuriesSinceJ2000(jd: f64) f64 {
     return (jd - JD_J2000) / 36525.0;
 }
 
+/// Среднее гринвичское звёздное время в градусах (Meeus 12.4), не заворачивается.
+pub fn gmstDeg(jd: f64) f64 {
+    const T = centuriesSinceJ2000(jd);
+    return 280.46061837 + 360.98564736629 * (jd - JD_J2000) +
+        0.000387933 * T * T - T * T * T / 38710000.0;
+}
+
 /// Unix-время из гражданской даты по UTC (для тестов и якорей).
 pub fn unixUTC(y: i32, mo: u8, d: u8, h: u8, mi: u8) i64 {
     return daysFromCivil(y, mo, d) * 86400 + @as(i64, h) * 3600 + @as(i64, mi) * 60;

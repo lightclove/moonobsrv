@@ -10,3 +10,5 @@ pub const planets = @import("astro/planets.zig");
 pub const retro = @import("astro/retro.zig");
 pub const voc = @import("astro/voc.zig");
 pub const lunday = @import("astro/lunday.zig");
+pub const rise = @import("astro/rise.zig");
+pub const lunday_rise = @import("astro/lunday_rise.zig");

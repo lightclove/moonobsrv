@@ -42,7 +42,8 @@ pub const Flag = enum {
 };
 
 /// Статус доступа пользователя (whitelist в Postgres).
-pub const Status = enum { active, pending, denied };
+/// none — строки в app_user нет (новый пользователь) либо БД не ответила.
+pub const Status = enum { active, pending, denied, none };
 
 pub const UserRow = struct { id: i64, name: []const u8 };
 
@@ -246,7 +247,8 @@ pub const Store = struct {
         if (self.db) |db| {
             var arena = std.heap.ArenaAllocator.init(self.alloc);
             defer arena.deinit();
-            var b: [96]u8 = undefined;
+            // 95 байт фиксированной части + до 19 цифр update_id: [96] не хватало
+            var b: [160]u8 = undefined;
             var w: std.Io.Writer = .fixed(&b);
             w.print("INSERT INTO bot_kv (k, v) VALUES ('tg_offset', '{d}') ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v", .{v}) catch return;
             self.db_ok = if (db.exec(arena.allocator(), w.buffered())) |_| true else |_| false;
@@ -347,26 +349,39 @@ pub const Store = struct {
     }
 
     /// Копия подписчиков для рассылки (читается под мьютексом).
+    /// Усечение по буферу вызова диагностируется в лог — молчать о потере нельзя.
     pub fn subsSnapshot(self: *Store, buf: []i64) []i64 {
         self.mutex.lock();
         defer self.mutex.unlock();
         const n = @min(buf.len, self.subs.items.len);
+        if (self.subs.items.len > n) {
+            log("subsSnapshot: {d} подписчиков сверх буфера не попали в рассылку", .{self.subs.items.len - n});
+        }
         @memcpy(buf[0..n], self.subs.items[0..n]);
         return buf[0..n];
     }
 
+    /// Число подписчиков под мьютексом — /status читает список из другого
+    /// потока, прямое обращение к subs.items гоняется с addSub/removeSub.
+    pub fn subsCount(self: *Store) usize {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.subs.items.len;
+    }
+
     // ─── Whitelist ─────────────────────────────────────────────────────────
 
-    /// Без БД бот открыт: все считаются active.
+    /// Без БД бот открыт: все считаются active. При сбое PG — fail-closed
+    /// (.none): неизвестных не пускаем, известных узнаёт кэш isActive.
     pub fn statusOf(self: *Store, id: i64, buf: []u8) Status {
         const db = self.db orelse return .active;
         var arena = std.heap.ArenaAllocator.init(self.alloc);
         defer arena.deinit();
         var w: std.Io.Writer = .fixed(buf);
-        w.print("SELECT status FROM app_user WHERE tg_id = {d}", .{id}) catch return .active;
-        const res = db.exec(arena.allocator(), w.buffered()) catch return .active;
-        if (res.rows.len == 0) return .pending; // неизвестный → заявка
-        const s = res.rows[0].values[0] orelse return .pending;
+        w.print("SELECT status FROM app_user WHERE tg_id = {d}", .{id}) catch return .none;
+        const res = db.exec(arena.allocator(), w.buffered()) catch return .none;
+        if (res.rows.len == 0) return .none; // неизвестный → заявка
+        const s = res.rows[0].values[0] orelse return .none;
         if (std.mem.eql(u8, s, "active")) return .active;
         if (std.mem.eql(u8, s, "denied")) return .denied;
         return .pending;
@@ -391,24 +406,38 @@ pub const Store = struct {
         {
             var b: [128]u8 = undefined;
             var w: std.Io.Writer = .fixed(&b);
-            w.print("SELECT status FROM app_user WHERE tg_id = {d}", .{id}) catch return false;
-            const res = db.exec(a, w.buffered()) catch return false;
+            w.print("SELECT status FROM app_user WHERE tg_id = {d}", .{id}) catch {
+                self.db_ok = false;
+                return false;
+            };
+            const res = db.exec(a, w.buffered()) catch {
+                self.db_ok = false; // иначе handleUnknown соврёт «заявка отправлена»
+                return false;
+            };
             if (res.rows.len > 0) {
                 const s = res.rows[0].values[0] orelse "";
                 if (std.mem.eql(u8, s, "active")) return false;
                 if (std.mem.eql(u8, s, "pending")) return false; // уже на рассмотрении
-                // denied: молча обновляем заявку, без уведомления
+                // denied: заявка обновляется (статус → pending), админ получит
+                // новую карточку; от спама защищает дальнейший pending
             }
         }
-        var nb: [512]u8 = undefined;
-        var name_esc: std.Io.Writer = .fixed(nb[0..400]);
-        pg.quoteLit(&name_esc, name) catch return false;
-        var w2: std.Io.Writer = .fixed(&nb);
-        w2.print("INSERT INTO app_user (tg_id, status, display_name, created_at) VALUES ({d}, 'pending', ", .{id}) catch return false;
-        w2.writeAll(name_esc.buffered()) catch return false;
-        w2.print(", {d}) ON CONFLICT (tg_id) DO UPDATE SET status = 'pending', display_name = EXCLUDED.display_name", .{std.time.timestamp()}) catch return false;
-        self.db_ok = db.exec(a, w2.buffered());
+        var sb: [768]u8 = undefined;
+        var sql: std.Io.Writer = .fixed(&sb);
+        writeRequestAccessSql(&sql, id, name) catch return false;
+        self.db_ok = if (db.exec(a, sql.buffered())) |_| true else |_| false;
         return self.db_ok;
+    }
+
+    /// Сборка SQL заявки. Чистая функция для теста: экранированное имя
+    /// обязано попасть в VALUES как есть (регрессия алиасинга буферов).
+    fn writeRequestAccessSql(w: *std.Io.Writer, id: i64, name: []const u8) !void {
+        var nb: [512]u8 = undefined;
+        var name_esc: std.Io.Writer = .fixed(&nb);
+        try pg.quoteLit(&name_esc, name);
+        try w.print("INSERT INTO app_user (tg_id, status, display_name, created_at) VALUES ({d}, 'pending', ", .{id});
+        try w.writeAll(name_esc.buffered());
+        try w.print(", {d}) ON CONFLICT (tg_id) DO UPDATE SET status = 'pending', display_name = EXCLUDED.display_name", .{std.time.timestamp()});
     }
 
     pub fn allowUser(self: *Store, id: i64) bool {
@@ -602,4 +631,28 @@ test "schema_sql: идемпотентные таблицы" {
     try std.testing.expect(std.mem.indexOf(u8, schema_sql, "CREATE TABLE IF NOT EXISTS tg_inbox") != null);
     // несколько команд в одном batch — допустимо простым протоколом
     try std.testing.expect(std.mem.indexOf(u8, schema_sql, ";") != null);
+}
+
+test "SQL заявки: экранированное имя не затирается префиксом (BUG-019)" {
+    var sb: [768]u8 = undefined;
+    var sql: std.Io.Writer = .fixed(&sb);
+    try Store.writeRequestAccessSql(&sql, 42, "Аня");
+    const s = sql.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, s, "VALUES (42, 'pending', 'Аня',") != null);
+    // INSERT в тексте ровно один — в начале, а не внутри VALUES
+    try std.testing.expect(std.mem.indexOf(u8, s, "INSERT") == 0);
+    try std.testing.expect(std.mem.indexOfPos(u8, s, 1, "INSERT") == null);
+    // имя с кавычкой экранируется и остаётся на месте
+    var sb2: [768]u8 = undefined;
+    var sql2: std.Io.Writer = .fixed(&sb2);
+    try Store.writeRequestAccessSql(&sql2, 7, "O'Brien");
+    try std.testing.expect(std.mem.indexOf(u8, sql2.buffered(), "'O''Brien'") != null);
+}
+
+test "setUpdateCursor: SQL влезает в буфер при любом update_id (BUG-024)" {
+    const max_len = std.fmt.count(
+        "INSERT INTO bot_kv (k, v) VALUES ('tg_offset', '{d}') ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v",
+        .{std.math.maxInt(i64)},
+    );
+    try std.testing.expect(max_len <= 160);
 }

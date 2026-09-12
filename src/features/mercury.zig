@@ -100,7 +100,7 @@ pub fn onTick(base: router.Base) !void {
         }
         try w.print("\n\nПланы можно запускать, но ещё раз проверьте начатое в ретро.", .{});
     }
-    var snap: [128]i64 = undefined;
+    var snap: [256]i64 = undefined;
     notify.broadcast(base.api, base.store.subsSnapshot(&snap), w.buffered());
 }
 

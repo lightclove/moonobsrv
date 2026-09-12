@@ -165,9 +165,10 @@ pub const Probes = struct {
 
 pub const Socks = config.Config.Socks;
 
-/// TCP-коннект с дедлайном: поток с атомарным флагом — main ждёт не дольше
-/// timeout_ms (мёртвый DNS/getaddrinfo не блокирует вызывающего). Если
-/// коннект не успел — поток продолжает жить независимо (state в куче).
+/// TCP-коннект с дедлайном: поток с атомарным флагом — вызывающий ждёт не
+/// дольше timeout_ms. DNS-резолв выполняется в потоке вызывающего (в боте
+/// зависший резолв страховает watchdog; hostwatch ходит по IP-литералам).
+/// Если коннект не успел — поток продолжает жить независимо (state в куче).
 pub fn tcpProbe(host: []const u8, port: u16, timeout_ms: u32) bool {
     if (std.net.Address.parseIp(host, port)) |addr| {
         return tcpProbeAddr(addr, timeout_ms);
@@ -251,13 +252,21 @@ pub const DockerResp = struct {
 
 pub const has_docker_socket = builtin.os.tag != .windows;
 
-/// Сырой HTTP/1.0 запрос к Docker Engine API. null — сокета нет/обрыв.
-/// Ввод-вывод сырыми write/read: путь компилируется только на Unix.
+/// Сырой HTTP/1.0 запрос к Docker Engine API. null — сокета нет/обрыв/битый
+/// ответ. Ввод-вывод сырыми write/read: путь компилируется только на Unix.
 pub fn dockerHttp(arena: std.mem.Allocator, method: []const u8, path: []const u8, body: ?[]const u8, read_timeout_s: u32) ?DockerResp {
-    _ = read_timeout_s; // блокирующий сокет; watchdog страхует от зависаний
+    var wrote_dummy: bool = undefined;
+    return dockerHttpEx(arena, method, path, body, read_timeout_s, &wrote_dummy);
+}
+
+/// Как dockerHttp, но `wrote` отличает «запрос не отправлен» (false —
+/// сокета нет/запись не прошла) от «отправлен, ответа нет» (true).
+pub fn dockerHttpEx(arena: std.mem.Allocator, method: []const u8, path: []const u8, body: ?[]const u8, read_timeout_s: u32, wrote: *bool) ?DockerResp {
+    wrote.* = false;
     if (comptime !has_docker_socket) return null;
     const stream = std.net.connectUnixSocket(DOCKER_SOCK) catch return null;
     defer stream.close();
+    setUnixTimeout(stream, read_timeout_s); // зависший демон не паркует вызывающего (в hostwatch нет watchdog)
     var wbuf: [2048]u8 = undefined;
     var w: std.Io.Writer = .fixed(&wbuf);
     w.print("{s} {s} HTTP/1.0\r\nHost: docker\r\n", .{ method, path }) catch return null;
@@ -267,11 +276,19 @@ pub fn dockerHttp(arena: std.mem.Allocator, method: []const u8, path: []const u8
     w.writeAll("\r\n") catch return null;
     if (body) |b| w.writeAll(b) catch return null;
     stream.writeAll(w.buffered()) catch return null;
+    wrote.* = true;
 
-    // HTTP/1.0: тело до конца потока (блокирующее чтение, EOF по close).
-    var buf: [64 * 1024]u8 = undefined;
+    // HTTP/1.0: тело до конца потока (EOF по close). Буфер растёт — десятки
+    // контейнеров на хосте дают больше 64 КиБ; потолок 1 МиБ.
+    var cap: usize = 64 * 1024;
+    var buf = arena.alloc(u8, cap) catch return null;
     var n: usize = 0;
-    while (n < buf.len) {
+    while (true) {
+        if (n == buf.len) {
+            if (cap >= 1024 * 1024) return null;
+            cap *= 2;
+            buf = arena.realloc(u8, buf, cap) catch return null;
+        }
         const got = stream.read(buf[n..]) catch break;
         if (got == 0) break;
         n += got;
@@ -283,6 +300,13 @@ pub fn dockerHttp(arena: std.mem.Allocator, method: []const u8, path: []const u8
     return .{ .status = status, .body = body_out };
 }
 
+/// SO_RCVTIMEO/SO_SNDTIMEO на unix-сокете Docker.
+fn setUnixTimeout(stream: std.net.Stream, seconds: u32) void {
+    const tv = std.posix.timeval{ .sec = @intCast(seconds), .usec = 0 };
+    _ = std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
+    _ = std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&tv)) catch {};
+}
+
 pub const Container = struct {
     name: []const u8,
     service: []const u8,
@@ -291,6 +315,9 @@ pub const Container = struct {
 };
 
 /// Разбор /containers/json?all=1: фильтр по compose-проекту.
+/// Типы полей не доверяем: Docker присылает "Labels": null для контейнеров
+/// без лейблов (moby не нормализует nil-мапу) — доступ к неактивному полю
+/// Value.Value паникует в Debug и даёт UB в ReleaseSmall.
 pub fn parseContainers(arena: std.mem.Allocator, body: []const u8, project: []const u8) ![]Container {
     const parsed = std.json.parseFromSlice(std.json.Value, arena, body, .{}) catch return &.{};
     const arr = switch (parsed.value) {
@@ -299,17 +326,23 @@ pub fn parseContainers(arena: std.mem.Allocator, body: []const u8, project: []co
     };
     var list: std.ArrayList(Container) = .empty;
     for (arr.items) |item| {
+        if (item != .object) continue;
         const obj = item.object;
-        const labels = (obj.get("Labels") orelse continue).object;
-        const proj = (labels.get("com.docker.compose.project") orelse continue).string;
-        if (!std.mem.eql(u8, proj, project)) continue;
-        const svc = if (labels.get("com.docker.compose.service")) |v| v.string else "";
+        const labels_v = obj.get("Labels") orelse continue;
+        if (labels_v != .object) continue;
+        const labels = labels_v.object;
+        const proj_v = labels.get("com.docker.compose.project") orelse continue;
+        if (proj_v != .string) continue;
+        if (!std.mem.eql(u8, proj_v.string, project)) continue;
+        const svc = strOrNull(labels.get("com.docker.compose.service"));
         var name: []const u8 = "?";
         if (obj.get("Names")) |names| {
-            if (names.array.items.len > 0) name = std.mem.trimLeft(u8, names.array.items[0].string, "/");
+            if (names == .array and names.array.items.len > 0 and names.array.items[0] == .string) {
+                name = std.mem.trimLeft(u8, names.array.items[0].string, "/");
+            }
         }
-        const state = if (obj.get("State")) |v| v.string else "";
-        const status = if (obj.get("Status")) |v| v.string else "";
+        const state = strOrNull(obj.get("State"));
+        const status = strOrNull(obj.get("Status"));
         const running = std.mem.eql(u8, state, "running");
         const healthy = running and std.mem.indexOf(u8, status, "unhealthy") == null;
         try list.append(arena, .{ .name = name, .service = svc, .running = running, .healthy = healthy });
@@ -322,18 +355,35 @@ pub fn parseContainers(arena: std.mem.Allocator, body: []const u8, project: []co
     return list.items;
 }
 
+/// Строка из optional-Value или "".
+fn strOrNull(v: ?std.json.Value) []const u8 {
+    if (v) |val| {
+        if (val == .string) return val.string;
+    }
+    return "";
+}
+
 /// Id контейнера compose-сервиса (bot/db/tor).
 pub fn composeId(arena: std.mem.Allocator, project: []const u8, service: []const u8) ?[]const u8 {
     const resp = dockerHttp(arena, "GET", "/containers/json?all=1", null, 5) orelse return null;
     if (resp.status != 200) return null;
     const parsed = std.json.parseFromSlice(std.json.Value, arena, resp.body, .{}) catch return null;
-    for (parsed.value.array.items) |item| {
+    const arr = switch (parsed.value) {
+        .array => |a| a,
+        else => return null,
+    };
+    for (arr.items) |item| {
+        if (item != .object) continue;
         const obj = item.object;
-        const labels = (obj.get("Labels") orelse continue).object;
-        const proj = (labels.get("com.docker.compose.project") orelse continue).string;
-        const svc = (labels.get("com.docker.compose.service") orelse continue).string;
+        const labels_v = obj.get("Labels") orelse continue;
+        if (labels_v != .object) continue;
+        const labels = labels_v.object;
+        const proj = strOrNull(labels.get("com.docker.compose.project"));
+        const svc = strOrNull(labels.get("com.docker.compose.service"));
         if (std.mem.eql(u8, proj, project) and std.mem.eql(u8, svc, service)) {
-            return obj.get("Id").?.string;
+            const id_v = obj.get("Id") orelse continue;
+            if (id_v != .string) continue;
+            return id_v.string;
         }
     }
     return null;
@@ -346,18 +396,22 @@ pub fn containerIp(arena: std.mem.Allocator, id: []const u8) ?[]const u8 {
     const resp = dockerHttp(arena, "GET", path, null, 5) orelse return null;
     if (resp.status != 200) return null;
     const parsed = std.json.parseFromSlice(std.json.Value, arena, resp.body, .{}) catch return null;
-    const ns = parsed.value.object.get("NetworkSettings") orelse return null;
-    if (ns.object.get("Networks")) |nets| {
-        var it = nets.object.iterator();
-        while (it.next()) |e| {
-            if (e.value_ptr.object.get("IPAddress")) |ip| {
-                if (ip.string.len > 0) return ip.string;
+    if (parsed.value != .object) return null;
+    const ns_v = parsed.value.object.get("NetworkSettings") orelse return null;
+    if (ns_v != .object) return null;
+    const ns = ns_v.object;
+    if (ns.get("Networks")) |nets_v| {
+        if (nets_v == .object) {
+            var it = nets_v.object.iterator();
+            while (it.next()) |e| {
+                if (e.value_ptr.* != .object) continue;
+                const ip = strOrNull(e.value_ptr.object.get("IPAddress"));
+                if (ip.len > 0) return ip;
             }
         }
     }
-    if (ns.object.get("IPAddress")) |ip| {
-        if (ip.string.len > 0) return ip.string;
-    }
+    const ip = strOrNull(ns.get("IPAddress"));
+    if (ip.len > 0) return ip;
     return null;
 }
 
@@ -367,7 +421,11 @@ pub const Bounce = enum { ok, fail, sent, no_docker, missing };
 pub fn dockerRestart(arena: std.mem.Allocator, id: []const u8) Bounce {
     var pbuf: [256]u8 = undefined;
     const path = std.fmt.bufPrint(&pbuf, "/containers/{s}/restart?t=8", .{id}) catch return .fail;
-    const resp = dockerHttp(arena, "POST", path, null, 25) orelse return .sent;
+    var wrote: bool = false;
+    const resp = dockerHttpEx(arena, "POST", path, null, 25, &wrote) orelse {
+        // «не отправлено» ≠ «отправлено без ответа» — админу не врать
+        return if (wrote) .sent else .no_docker;
+    };
     return if (resp.status >= 200 and resp.status < 300) .ok else .fail;
 }
 
@@ -426,6 +484,30 @@ test "parseContainers: фильтр по проекту, статусы, сор�
     try std.testing.expectEqualStrings("db", list[1].service);
     try std.testing.expect(list[1].healthy); // running без healthcheck — здоров
     try std.testing.expect(!list[2].running and !list[2].healthy);
+}
+
+// BUG: Docker присылает "Labels": null для контейнеров без лейблов (moby
+// не нормализует nil-мапу) — раньше .object на null паникул в Debug и давал
+// UB на проде (ReleaseSmall). Чужой контейнер на хосте = краш каждого /monitor.
+test "parseContainers: Labels null и нестроковые поля не роняют разбор" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const body =
+        \\[{"Id":"x1","Names":["/stray-1"],"State":"running","Status":"Up","Labels":null},
+        \\ {"Id":"a1","Names":["/moonobsrv-bot-1"],"State":"running","Status":"Up","Labels":{"com.docker.compose.project":"moonobsrv","com.docker.compose.service":"bot"}},
+        \\ {"Id":"x2","Names":[],"State":"running","Status":"Up","Labels":{"com.docker.compose.project":42}},
+        \\ {"Id":"x3","Names":null,"Labels":{"com.docker.compose.project":"moonobsrv","com.docker.compose.service":true}},
+        \\ "не объект"]
+    ;
+    const list = try parseContainers(arena, body, "moonobsrv");
+    // x1/x2 отсеяны (Labels null, проект не-строка), «не объект» пропущен;
+    // x3 принят с пустым сервисом и именем «?» («?» < 'm', сортировка первым)
+    try std.testing.expectEqual(@as(usize, 2), list.len);
+    try std.testing.expectEqualStrings("?", list[0].name);
+    try std.testing.expectEqualStrings("", list[0].service);
+    try std.testing.expectEqualStrings("moonobsrv-bot-1", list[1].name);
+    try std.testing.expectEqualStrings("bot", list[1].service);
 }
 
 test "runtime-файлы: запись/чтение/удаление" {

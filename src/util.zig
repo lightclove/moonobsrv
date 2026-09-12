@@ -58,17 +58,20 @@ pub fn fmtDateTime(buf: []u8, secs: i64, tz_off: i32, now_for_year: i64) []const
     }) catch buf[0..0];
 }
 
-/// Метка часового пояса: «МСК» для UTC+3, иначе «UTC+5:30».
+/// Метка часового пояса: «МСК» для UTC+3, иначе «UTC+5:30», «UTC-13:45».
+/// Часы/минуты считаются от модуля смещения: divTrunc+mod на отрицательных
+/// дробных давали «UTC-13:15» вместо «UTC-13:45».
 pub fn tzLabel(buf: []u8, off_sec: i32) []const u8 {
     if (off_sec == 3 * 3600) return "МСК";
     if (off_sec == 0) return "UTC";
-    const h = @divTrunc(off_sec, 3600);
-    const m: u32 = @intCast(@abs(@mod(off_sec, 3600)));
+    const a: u32 = @abs(off_sec);
+    const h: u32 = a / 3600;
+    const m: u32 = (a % 3600) / 60;
     const sign: []const u8 = if (off_sec < 0) "-" else "+";
     if (m == 0) {
-        return std.fmt.bufPrint(buf, "UTC{s}{d}", .{ sign, @abs(h) }) catch buf[0..0];
+        return std.fmt.bufPrint(buf, "UTC{s}{d}", .{ sign, h }) catch buf[0..0];
     }
-    return std.fmt.bufPrint(buf, "UTC{s}{d}:{d:0>2}", .{ sign, @abs(h), m }) catch buf[0..0];
+    return std.fmt.bufPrint(buf, "UTC{s}{d}:{d:0>2}", .{ sign, h, m }) catch buf[0..0];
 }
 
 /// «3 ч 15 мин», «2 д 4 ч», «45 мин».
@@ -157,6 +160,7 @@ pub fn parseDateArg(args: []const u8, tz: i32) !?i64 {
     if (month < 1 or month > 12 or day < 1 or day > 31 or year < 1900 or year > 2200) {
         return error.BadDate;
     }
+    if (day > daysInMonth(year, month)) return error.BadDate;
 
     const days = @import("astro/time.zig").daysFromCivil(year, month, day);
     return days * 86400 + 12 * 3600 - tz;
@@ -179,4 +183,48 @@ test "parseDateArg" {
     try std.testing.expectError(error.BadDate, parseDateArg("32.13", 0));
     try std.testing.expectError(error.BadDate, parseDateArg("завтра", 0));
     try std.testing.expectError(error.BadDate, parseDateArg("1.1.1234", 0));
+}
+
+test "parseDateArg: несуществующие дни месяца (BUG-016)" {
+    // дни, которых в месяце нет, не должны молча «переливаться» в следующий
+    try std.testing.expectError(error.BadDate, parseDateArg("31.02", 0));
+    try std.testing.expectError(error.BadDate, parseDateArg("30.02", 0));
+    try std.testing.expectError(error.BadDate, parseDateArg("31.04", 0));
+    try std.testing.expectError(error.BadDate, parseDateArg("31.06", 0));
+    try std.testing.expectError(error.BadDate, parseDateArg("31.09", 0));
+    try std.testing.expectError(error.BadDate, parseDateArg("31.11", 0));
+    try std.testing.expectError(error.BadDate, parseDateArg("29.02.2026", 0)); // не високосный
+    try std.testing.expectError(error.BadDate, parseDateArg("2026-02-30", 0));
+    // високосный 29.02 принимается
+    try std.testing.expect((try parseDateArg("29.02.2028", 0)) != null);
+    try std.testing.expect((try parseDateArg("29.02.2000", 0)) != null); // кратный 400
+}
+
+fn daysInMonth(y: i32, m: u8) u8 {
+    return switch (m) {
+        1, 3, 5, 7, 8, 10, 12 => 31,
+        4, 6, 9, 11 => 30,
+        else => if (isLeapYear(y)) 29 else 28,
+    };
+}
+
+fn isLeapYear(y: i32) bool {
+    return @mod(y, 4) == 0 and (@mod(y, 100) != 0 or @mod(y, 400) == 0);
+}
+
+test "tzLabel: целые и дробные пояса (BUG-017, BUG-058)" {
+    var b1: [24]u8 = undefined;
+    var b2: [24]u8 = undefined;
+    var b3: [24]u8 = undefined;
+    var b4: [24]u8 = undefined;
+    var b5: [24]u8 = undefined;
+    var b6: [24]u8 = undefined;
+    var b7: [24]u8 = undefined;
+    try std.testing.expectEqualStrings("МСК", tzLabel(&b1, 3 * 3600));
+    try std.testing.expectEqualStrings("UTC", tzLabel(&b2, 0));
+    try std.testing.expectEqualStrings("UTC+5:30", tzLabel(&b3, 19800));
+    try std.testing.expectEqualStrings("UTC-4:30", tzLabel(&b4, -16200));
+    try std.testing.expectEqualStrings("UTC+1", tzLabel(&b5, 3600));
+    try std.testing.expectEqualStrings("UTC-13:45", tzLabel(&b6, -(13 * 3600 + 45 * 60)));
+    try std.testing.expectEqualStrings("UTC-8:45", tzLabel(&b7, -(8 * 3600 + 45 * 60)));
 }

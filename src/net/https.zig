@@ -119,17 +119,18 @@ pub const Client = struct {
         path: []const u8 = "/",
         body: ?[]const u8 = null,
         content_type: []const u8 = "application/json",
-        read_timeout_s: u32 = 75, // > таймаута long poll (50 с) с запасом
     };
 
     /// Выполняет запрос, тело пишется в `out`. При сетевой ошибке один раз
     /// пересоединяется и повторяет — «connection reset after idle» не должен
-    /// валить long poll.
+    /// валить long poll. Частичное тело первой попытки сбрасывается: иначе
+    /// повтор дописывал бы ответ к обрывку (мусор в getUpdates).
     pub fn request(self: *Client, opts: RequestOptions, out: *std.Io.Writer.Allocating) !u16 {
         if (self.requestOnce(opts, out)) |code| {
             return code;
         } else |_| {
             self.disconnect();
+            out.shrinkRetainingCapacity(0);
             return self.requestOnce(opts, out);
         }
     }

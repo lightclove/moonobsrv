@@ -27,14 +27,17 @@ pub const Url = struct {
     database: []const u8 = "postgres",
 };
 
-/// postgresql://user:pass@host:port/db — без Percent-кодирования (внутренние URL).
+/// postgresql://user:pass@host:port/db — без Percent-кодирования (внутренние
+/// URL). База отделяется первым '/' ПОСЛЕ последнего '@': '/' и '@' в пароле
+/// сгенерированных кредов не должны ломать разбор.
 pub fn parseUrl(raw: []const u8) !Url {
     var u = Url{};
     var rest = raw;
     if (std.mem.indexOf(u8, rest, "://")) |i| rest = rest[i + 3 ..];
-    if (std.mem.indexOfScalar(u8, rest, '/')) |i| {
-        u.database = rest[i + 1 ..];
-        rest = rest[0..i];
+    const at0 = std.mem.lastIndexOfScalar(u8, rest, '@') orelse 0;
+    if (std.mem.indexOfScalar(u8, rest[at0..], '/')) |i| {
+        u.database = rest[at0 + i + 1 ..];
+        rest = rest[0 .. at0 + i];
     }
     if (std.mem.lastIndexOfScalar(u8, rest, '@')) |i| {
         const creds = rest[0..i];
@@ -56,15 +59,16 @@ pub fn parseUrl(raw: []const u8) !Url {
 // ─── Кадры ─────────────────────────────────────────────────────────────────
 
 /// StartupMessage: длина, версия 3.0, пары key\x00value\x00, финальный \x00.
-pub fn buildStartup(buf: []u8, u: Url) []const u8 {
+/// null — не влезло в буфер (экзотически длинные user/database).
+pub fn buildStartup(buf: []u8, u: Url) ?[]const u8 {
     var w: std.Io.Writer = .fixed(buf);
-    w.writeInt(u32, 0, .big) catch unreachable; // место под длину
-    w.writeInt(u32, 196608, .big) catch unreachable; // 3.0
-    w.writeAll("user\x00") catch unreachable;
-    w.writeAll(u.user) catch unreachable;
-    w.writeAll("\x00database\x00") catch unreachable;
-    w.writeAll(u.database) catch unreachable;
-    w.writeAll("\x00application_name\x00moonobsrv\x00\x00") catch unreachable;
+    w.writeInt(u32, 0, .big) catch return null; // место под длину
+    w.writeInt(u32, 196608, .big) catch return null; // 3.0
+    w.writeAll("user\x00") catch return null;
+    w.writeAll(u.user) catch return null;
+    w.writeAll("\x00database\x00") catch return null;
+    w.writeAll(u.database) catch return null;
+    w.writeAll("\x00application_name\x00moonobsrv\x00\x00") catch return null;
     const m = w.buffered();
     std.mem.writeInt(u32, m[0..4], @intCast(m.len), .big);
     return m;
@@ -233,7 +237,8 @@ pub const Conn = struct {
         self.stream = s;
 
         var buf: [512]u8 = undefined;
-        s.writeAll(buildStartup(&buf, self.url)) catch return Error.PgConnect;
+        const startup = buildStartup(&buf, self.url) orelse return Error.PgBadUrl; // user/database не влезли
+        s.writeAll(startup) catch return Error.PgConnect;
         try self.authLoop(s);
         // до ReadyForQuery: ParameterStatus/BackendKeyData пропускаем
         var work: [4096]u8 = undefined;
@@ -262,15 +267,15 @@ pub const Conn = struct {
                         .ok => return,
                         .cleartext, .md5 => {
                             var pass_buf: [40]u8 = undefined;
-                            var pw_buf: [96]u8 = undefined;
+                            var pw_buf: [256]u8 = undefined;
                             var pw: std.Io.Writer = .fixed(&pw_buf);
                             if (auth.kind == .md5) {
-                                pw.writeAll(md5Pass(&pass_buf, self.url, auth.salt)) catch unreachable;
+                                pw.writeAll(md5Pass(&pass_buf, self.url, auth.salt)) catch unreachable; // 35 байт < 256
                             } else {
-                                pw.writeAll(self.url.password) catch unreachable;
+                                pw.writeAll(self.url.password) catch return Error.PgBadUrl; // пароль > 255 байт
                             }
                             pw.writeByte(0) catch unreachable;
-                            var frame: [128]u8 = undefined;
+                            var frame: [262]u8 = undefined;
                             s.writeAll(buildTagged(&frame, 'p', pw.buffered())) catch return Error.PgConnect;
                         },
                         .unsupported => {
@@ -350,6 +355,7 @@ pub const Conn = struct {
         _ = self;
         if (body.len < 2) return Error.PgProtocol;
         const n = std.mem.readInt(i16, body[0..2], .big);
+        if (n < 0) return Error.PgProtocol; // отрицательный count — битый кадр, не @intCast в usize
         var vals = arena.alloc(Value, @intCast(n)) catch return Error.OutOfMemory;
         var i: usize = 2;
         var col: usize = 0;
@@ -416,11 +422,19 @@ test "parseUrl" {
     try std.testing.expectEqualStrings("postgres", d.user);
     try std.testing.expectEqual(@as(u16, 5432), d.port);
     try std.testing.expectError(Error.PgBadUrl, parseUrl("postgresql://localhost/"));
+
+    // '/' в пароле не отрезает базу: база ищется после последнего '@'
+    const p = try parseUrl("postgresql://u:p/s@h:5432/db");
+    try std.testing.expectEqualStrings("u", p.user);
+    try std.testing.expectEqualStrings("p/s", p.password);
+    try std.testing.expectEqualStrings("h", p.host);
+    try std.testing.expectEqual(@as(u16, 5432), p.port);
+    try std.testing.expectEqualStrings("db", p.database);
 }
 
 test "startup-кадр" {
     var buf: [256]u8 = undefined;
-    const m = buildStartup(&buf, .{ .user = "u1", .database = "d1" });
+    const m = buildStartup(&buf, .{ .user = "u1", .database = "d1" }).?;
     try std.testing.expect(m.len > 8);
     const len = std.mem.readInt(u32, m[0..4], .big);
     try std.testing.expectEqual(@as(u32, @intCast(m.len)), len);
@@ -429,6 +443,17 @@ test "startup-кадр" {
     try std.testing.expect(std.mem.indexOf(u8, m, "database\x00d1\x00") != null);
     try std.testing.expect(std.mem.indexOf(u8, m, "application_name\x00moonobsrv\x00") != null);
     try std.testing.expectEqual(@as(u8, 0), m[m.len - 1]); // финальный \x00
+    // экзотически длинный user — null, а не unreachable/UB
+    var big: [512]u8 = undefined;
+    try std.testing.expect(buildStartup(&big, .{ .user = "u" ** 600, .database = "d" }) == null);
+}
+
+test "parseDataRow: отрицательный count колонок — ошибка, не UB" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var rows: std.ArrayList(Row) = .empty;
+    var c: Conn = undefined; // self в parseDataRow не используется
+    try std.testing.expectError(Error.PgProtocol, Conn.parseDataRow(&c, arena_state.allocator(), &rows, &.{ 0xFF, 0xFF }));
 }
 
 test "md5-пароль по формуле RFC" {

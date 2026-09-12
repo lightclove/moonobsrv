@@ -80,6 +80,27 @@ pub fn writeStatus(body: planets.Body, now: i64, tz: i32, w: *std.Io.Writer) !vo
     }
 }
 
+/// /planets: сводка всех планет — знак и ретроградность одной командой.
+pub fn writePlanets(now: i64, tz: i32, w: *std.Io.Writer) !void {
+    _ = tz;
+    const jd = astro.time.jdFromUnix(now);
+    try w.print("🪐 Планеты на момент запроса\n\n", .{});
+    const bodies = [_]planets.Body{ .mercury, .venus, .mars, .jupiter, .saturn, .uranus, .neptune, .pluto };
+    for (bodies) |body| {
+        const sign = voc.Sign.fromLongitude(planets.longitude(body, jd));
+        const is_retro = retro.isRetro(body, now);
+        try w.print("{s} {s}: {s} {s}, {s}\n", .{
+            body.glyph(), body.nameRu(), sign.glyph(), sign.inRu(),
+            if (is_retro) "ретроградное движение" else "директное",
+        });
+    }
+}
+
+fn cmdPlanets(ctx: *router.Ctx) !void {
+    const now = try ctx.moment();
+    try writePlanets(now, ctx.base.cfg.tz_offset_sec, ctx.reply);
+}
+
 pub fn onTick(base: router.Base) !void {
     const tz = base.cfg.tz_offset_sec;
     for (tracked) |t| {
@@ -105,18 +126,42 @@ pub fn onTick(base: router.Base) !void {
         } else {
             try w.print("{s} {s}: движение снова директное", .{ t.body.glyph(), t.body.nameRu() });
         }
-        var snap: [128]i64 = undefined;
+        var snap: [256]i64 = undefined;
         notify.broadcast(base.api, base.store.subsSnapshot(&snap), w.buffered());
     }
 }
 
-const commands_list: [tracked.len]router.Command = blk: {
-    var cmds: [tracked.len]router.Command = undefined;
+const commands_list: [tracked.len + 1]router.Command = blk: {
+    var cmds: [tracked.len + 1]router.Command = undefined;
     for (tracked, 0..) |t, i| {
         cmds[i] = .{ .name = t.cmd, .description = t.desc, .handler = cmdPlanet };
     }
+    cmds[tracked.len] = .{
+        .name = "/planets",
+        .description = "все планеты: знаки и ретро-движение (можно с датой)",
+        .handler = cmdPlanets,
+    };
     break :blk cmds;
 };
+
+test "/planets: все планеты со знаками и ретро (BUG-037)" {
+    var buf: [2048]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    const time = astro.time;
+    try writePlanets(time.unixUTC(2026, 9, 9, 12, 0), 3 * 3600, &w);
+    const s = w.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, s, "Меркурий") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "Венера") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "Сатурн") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "Плутон") != null);
+    // Сатурн в ретро-дуге июль–декабрь 2026
+    try std.testing.expect(std.mem.indexOf(u8, s, "Сатурн") != null and
+        std.mem.indexOf(u8, s, "ретроградное") != null);
+    // каждая строка завершается движением
+    try std.testing.expect(std.mem.indexOf(u8, s, "директное") != null);
+    // 8 строк планет + шапка
+    try std.testing.expect(std.mem.count(u8, s, "\n") >= 9);
+}
 
 pub const feature = features.Feature{
     .commands = &commands_list,
