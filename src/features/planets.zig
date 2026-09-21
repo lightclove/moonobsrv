@@ -62,6 +62,7 @@ pub fn writeStatus(body: planets.Body, now: i64, tz: i32, w: *std.Io.Writer) !vo
 
     var b_dt: [64]u8 = undefined;
     var b_dt2: [64]u8 = undefined;
+    var b_dur: [32]u8 = undefined;
 
     try w.print("{s} {s}: {s} {s}, ", .{ body.glyph(), body.nameRu(), sign.glyph(), sign.inRu() });
     if (is_retro) {
@@ -75,7 +76,9 @@ pub fn writeStatus(body: planets.Body, now: i64, tz: i32, w: *std.Io.Writer) !vo
             const win = wb[0].?;
             const t1 = util.fmtDateTime(&b_dt, win.start, tz, now);
             const t2 = util.fmtDateTime(&b_dt2, win.end, tz, now);
-            try w.print("Ближайший ретро-период: {s} — {s}", .{ t1, t2 });
+            try w.print("Ближайший ретро-период: с {s} по {s}, длится {s}", .{
+                t1, t2, util.fmtDur(&b_dur, win.end - win.start),
+            });
         }
     }
 }
@@ -121,7 +124,7 @@ pub fn onTick(base: router.Base) !void {
                 const win = wb[0].?;
                 const t1 = util.fmtDateTime(&b_dt, win.start, tz, base.now);
                 const t2 = util.fmtDateTime(&b_dt2, win.end, tz, base.now);
-                try w.print(": {s} — {s}", .{ t1, t2 });
+                try w.print(": с {s} по {s}", .{ t1, t2 });
             }
         } else {
             try w.print("{s} {s}: движение снова директное", .{ t.body.glyph(), t.body.nameRu() });

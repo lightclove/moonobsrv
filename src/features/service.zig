@@ -7,17 +7,29 @@ const features = @import("features.zig");
 const runtime = @import("../runtime.zig");
 const util = @import("../util.zig");
 const wizard = @import("wizard.zig");
+const keys = @import("../bot/keys.zig");
 
 fn sendHtmlWithKb(ctx: *router.Ctx, text: []const u8) void {
     var kb: [512]u8 = undefined;
     var kw: std.Io.Writer = .fixed(&kb);
     wizard.openKb(&kw) catch {};
     _ = ctx.base.api.sendMessageOpts(ctx.chat_id, text, true, kbKw(&kw)) catch {};
+    sendQuickKb(ctx);
 }
 
 fn kbKw(kw: *std.Io.Writer) ?[]const u8 {
     if (kw.buffered().len == 0) return null;
     return kw.buffered();
+}
+
+/// Постоянная клавиатура запросов — отдельным сообщением: у сообщения один
+/// reply_markup, inline-вход (гид/меню) и reply-клавиатура не совместимы.
+/// Повторная выдача безвредна: клиент просто показывает ту же клавиатуру.
+fn sendQuickKb(ctx: *router.Ctx) void {
+    var kb: [768]u8 = undefined;
+    var kw: std.Io.Writer = .fixed(&kb);
+    keys.markup(&kw) catch return;
+    _ = ctx.base.api.sendMessageOpts(ctx.chat_id, "⌨️ Под полем ввода — кнопки быстрых запросов. С датой — командой: /voc 21.09", false, kw.buffered()) catch {};
 }
 
 fn cmdStart(ctx: *router.Ctx) !void {

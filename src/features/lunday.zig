@@ -44,7 +44,9 @@ pub fn writeStatus(now: i64, tz: i32, obs: rise.Observer, w: *std.Io.Writer) !vo
 
     if (lunday_rise.assess(now, obs)) |r| {
         var b_pl: [48]u8 = undefined;
-        try w.print("\n🌄 По восходам Луны ({s}) — {d}-е лунные сутки\n", .{ fmtPlace(&b_pl, obs), r.number });
+        // «по Глобе» — так эту систему называют астрологи русской традиции;
+        // без имени блок «По восходам Луны» принимали за продолжение титхи
+        try w.print("\n🌄 По Глобе — от восхода до восхода Луны ({s}) — {d}-е лунные сутки\n", .{ fmtPlace(&b_pl, obs), r.number });
         try w.print("Начались: {s}\n", .{util.fmtDateTime(&b_dt, r.started, tz, now)});
         try w.print("Закончатся: {s}\n", .{util.fmtDateTime(&b_dt, r.ends, tz, now)});
     }
@@ -52,7 +54,7 @@ pub fn writeStatus(now: i64, tz: i32, obs: rise.Observer, w: *std.Io.Writer) !vo
     try w.print("\n🌙 Луна {s} {s}, освещённость {d}%, фаза: {s}\n", .{
         info.sign.glyph(), info.sign.inRu(), @as(u32, @intFromFloat(info.illum_pct + 0.5)), info.phase,
     });
-    try w.print("\nДве системы счёта. Титхи — 30-я часть лунного месяца, едина для всей Земли: {d}-й день начинается, когда элонгация Луна–Солнце проходит {d}°. Лунные сутки традиции — от восхода до восхода Луны в вашем месте, 1-е — с момента новолуния; к концу месяца отстают от титхи на 1–2 номера.", .{ info.number, @as(u16, info.number - 1) * 12 });
+    try w.print("\nДве системы счёта. Титхи (индийская традиция) — 30-я часть лунного месяца, едина для всей Земли: {d}-й день начинается, когда элонгация Луна–Солнце проходит {d}°. Система Глобы (русская традиция, «постсоветская» астрология) — лунные сутки от восхода до восхода Луны в вашем месте, 1-е — с момента новолуния; к концу месяца отстают от титхи на 1–2 номера.", .{ info.number, @as(u16, info.number - 1) * 12 });
 }
 
 pub fn onTick(base: router.Base) !void {
@@ -73,7 +75,7 @@ pub fn onTick(base: router.Base) !void {
     try w.print("🌙 Начался {d}-й лунный день (титхи)\n", .{info.number});
     try w.print("Закончится: {s}\n", .{util.fmtDateTime(&b_dt, info.ends, tz, base.now)});
     if (lunday_rise.assess(base.now, observerOf(base.cfg))) |r| {
-        try w.print("По восходам Луны — {d}-е лунные сутки, до {s}\n", .{ r.number, util.fmtDateTime(&b_dt, r.ends, tz, base.now) });
+        try w.print("По Глобе — {d}-е лунные сутки, до {s}\n", .{ r.number, util.fmtDateTime(&b_dt, r.ends, tz, base.now) });
     }
     try w.print("Луна {s} {s}, фаза: {s}", .{ info.sign.glyph(), info.sign.inRu(), info.phase });
     var snap: [256]i64 = undefined;
@@ -85,7 +87,7 @@ pub const feature = features.Feature{
         .{
             .name = "/day",
             .aliases = &.{ "/lunday", "/moon", "/луна" },
-            .description = "лунный день: титхи и сутки от восхода, сейчас или на дату (/day 21.09)",
+            .description = "лунный день: титхи и лунные сутки по Глобе, сейчас или на дату (/day 21.09)",
             .handler = cmdDay,
         },
     },

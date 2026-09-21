@@ -22,13 +22,15 @@ pub fn writeStatus(now: i64, tz: i32, w: *std.Io.Writer) !void {
     var b_dt: [64]u8 = undefined;
     var b_dt2: [64]u8 = undefined;
     var b_dur: [32]u8 = undefined;
+    var b_dur2: [32]u8 = undefined;
 
     if (is_retro and n > 0) {
         const win = wb[0].?;
         const t1 = util.fmtDateTime(&b_dt, win.start, tz, now);
         const t2 = util.fmtDateTime(&b_dt2, win.end, tz, now);
         try w.print("☿ Меркурий РЕТРОГРАДЕН\n", .{});
-        try w.print("Период: {s} — {s} (осталось {s})\n", .{ t1, t2, util.fmtDur(&b_dur, win.end - now) });
+        try w.print("Начался: {s}\n", .{t1});
+        try w.print("Закончится: {s} (через {s})\n", .{ t2, util.fmtDur(&b_dur, win.end - now) });
         try w.print("Пост-тень до {s} — перепроверьте важное.\n\n", .{
             util.fmtDateTime(&b_dt, win.post_shadow, tz, now),
         });
@@ -37,7 +39,7 @@ pub fn writeStatus(now: i64, tz: i32, w: *std.Io.Writer) !void {
             const nx = wb[1].?;
             const n1 = util.fmtDateTime(&b_dt, nx.start, tz, now);
             const n2 = util.fmtDateTime(&b_dt2, nx.end, tz, now);
-            try w.print("\n\nСледующий ретро-период: {s} — {s}.", .{ n1, n2 });
+            try w.print("\n\nСледующий ретро-период: с {s} по {s}.", .{ n1, n2 });
         }
         return;
     }
@@ -47,7 +49,9 @@ pub fn writeStatus(now: i64, tz: i32, w: *std.Io.Writer) !void {
         const win = wb[0].?;
         const t1 = util.fmtDateTime(&b_dt, win.start, tz, now);
         const t2 = util.fmtDateTime(&b_dt2, win.end, tz, now);
-        try w.print("Ближайший ретро-период: {s} — {s}\n", .{ t1, t2 });
+        try w.print("Ближайший ретро-период: с {s} (через {s}) по {s} — длится {s}\n", .{
+            t1, util.fmtDur(&b_dur, win.start - now), t2, util.fmtDur(&b_dur2, win.end - win.start),
+        });
         const p1 = util.fmtDateTime(&b_dt, win.pre_shadow, tz, now);
         const p2 = util.fmtDateTime(&b_dt2, win.post_shadow, tz, now);
         try w.print("Пред-тень с {s}, пост-тень до {s}\n", .{ p1, p2 });
@@ -55,7 +59,7 @@ pub fn writeStatus(now: i64, tz: i32, w: *std.Io.Writer) !void {
             const nx = wb[1].?;
             const n1 = util.fmtDateTime(&b_dt, nx.start, tz, now);
             const n2 = util.fmtDateTime(&b_dt2, nx.end, tz, now);
-            try w.print("Затем: {s} — {s}", .{ n1, n2 });
+            try w.print("Затем: с {s} по {s}", .{ n1, n2 });
         }
     }
 }
@@ -81,7 +85,7 @@ pub fn onTick(base: router.Base) !void {
             const win = wb[0].?;
             const t1 = util.fmtDateTime(&b_dt, win.start, tz, base.now);
             const t2 = util.fmtDateTime(&b_dt2, win.end, tz, base.now);
-            try w.print(": {s} — {s}", .{ t1, t2 });
+            try w.print(": с {s} по {s}", .{ t1, t2 });
         }
         try w.print("\n\nПроверяйте технику, договоры и данные дважды; вернитесь к отложенным делам.", .{});
     } else {

@@ -11,6 +11,7 @@ const storemod = @import("bot/store.zig");
 const tg = @import("bot/telegram.zig");
 const access = @import("bot/access.zig");
 const cb = @import("bot/cb.zig");
+const keys = @import("bot/keys.zig");
 const wizard = @import("features/wizard.zig");
 
 /// Полное обновление (сообщение или callback_query).
@@ -74,7 +75,9 @@ pub fn handleMessage(
         .api = api,
     };
 
-    if (router.match(&features.commands, text)) |m| {
+    // текст кнопки клавиатуры запросов эквивалентен команде (гейт доступа
+    // ниже работает для обоих путей одинаково — from_id у сообщения есть)
+    if (router.match(&features.commands, keys.effective(text))) |m| {
         var label_buf: [96]u8 = undefined;
         var label: []const u8 = "";
         if (from) |f| {

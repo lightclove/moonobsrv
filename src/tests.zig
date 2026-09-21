@@ -23,6 +23,7 @@ test {
     _ = @import("bot/rst.zig");
     _ = @import("bot/access.zig");
     _ = @import("bot/cb.zig");
+    _ = @import("bot/keys.zig");
     _ = @import("features/features.zig");
     _ = @import("hostwatch.zig");
 }
@@ -332,6 +333,18 @@ test "тексты фич: форматирование без мусора" {
     try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "Луна не холостая") != null);
     try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "Деву") != null);
     try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "22:36") != null);
+    // конец ближайшего периода назван явно: «по …» и длительность
+    try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "длится") != null);
+
+    // холостая ветка: астроякорь 9.09.2026 — VOC перед входом в Деву
+    // в 22:36 МСК (момент 22:00 МСК внутри периода; найден сканом assess)
+    var bufv: [4096]u8 = undefined;
+    var wv: std.Io.Writer = .fixed(&bufv);
+    try f_voc.writeStatus(1788980400, 3 * 3600, &wv);
+    try std.testing.expect(std.mem.indexOf(u8, wv.buffered(), "ХОЛОСТАЯ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wv.buffered(), "Закончится") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wv.buffered(), "через") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wv.buffered(), "22:36") != null);
 
     var buf2: [4096]u8 = undefined;
     var w2: std.Io.Writer = .fixed(&buf2);
@@ -340,6 +353,18 @@ test "тексты фич: форматирование без мусора" {
     // даты станций печатаются раздельно: обе части диапазона присутствуют
     try std.testing.expect(std.mem.indexOf(u8, w2.buffered(), "24 октября") != null);
     try std.testing.expect(std.mem.indexOf(u8, w2.buffered(), "13 ноября") != null);
+    // до начала и длительность окна названы явно
+    try std.testing.expect(std.mem.indexOf(u8, w2.buffered(), "через") != null);
+    try std.testing.expect(std.mem.indexOf(u8, w2.buffered(), "длится") != null);
+
+    // ретро-ветка: середина окна 24.10–13.11.2026 (якорь станций Меркурия)
+    var bufm: [4096]u8 = undefined;
+    var wm: std.Io.Writer = .fixed(&bufm);
+    try f_mercury.writeStatus(time.unixUTC(2026, 11, 1, 12, 0), 3 * 3600, &wm);
+    try std.testing.expect(std.mem.indexOf(u8, wm.buffered(), "РЕТРОГРАДЕН") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wm.buffered(), "Начался") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wm.buffered(), "Закончится") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wm.buffered(), "13 ноября") != null);
 
     var buf3: [4096]u8 = undefined;
     var w3: std.Io.Writer = .fixed(&buf3);
@@ -347,5 +372,6 @@ test "тексты фич: форматирование без мусора" {
     try std.testing.expect(std.mem.indexOf(u8, w3.buffered(), "28-й лунный день") != null);
     try std.testing.expect(std.mem.indexOf(u8, w3.buffered(), "324") != null); // (28-1)*12 без u8-переполнения
     try std.testing.expect(std.mem.indexOf(u8, w3.buffered(), "лунные сутки") != null); // блок «от восхода» есть
+    try std.testing.expect(std.mem.indexOf(u8, w3.buffered(), "Глоб") != null); // система названа по имени (по Глобе/Глобы)
     try std.testing.expect(std.mem.indexOf(u8, w3.buffered(), "55.8° с.ш., 37.6° в.д.") != null);
 }

@@ -54,10 +54,13 @@ pub fn writeStatus(now: i64, tz: i32, w: *std.Io.Writer) !void {
                 util.fmtDateTime(&b_dt, s.sign_entered, tz, now),
             });
         }
-        try w.print("Вход {s}: {s} (через {s})\n\n", .{
-            s.sign.next().accRu(),
+        // конец холостого периода называем словом «Закончится» — ингрессия
+        // сама по себе («Вход в знак: …») читалась как справка о знаке,
+        // а не как конец периода
+        try w.print("Закончится: {s} (через {s}) — Луна войдёт {s}\n\n", .{
             util.fmtDateTime(&b_dt, s.ingress, tz, now),
             util.fmtDur(&b_dur, s.ingress - now),
+            s.sign.next().accRu(),
         });
         try w.print("В холостой период не начинайте важных дел, сделок и покупок — время рутины, завершения начатого и отдыха.", .{});
     } else {
@@ -82,9 +85,15 @@ pub fn writeStatus(now: i64, tz: i32, w: *std.Io.Writer) !void {
             const to = util.fmtDateTime(&b_dt2, s.ingress, tz, now);
             try w.print("\nБлижайший холостой период: с {s}", .{from});
             if (last.t > now) {
-                try w.print(" (после аспекта {s} {s})", .{ last.aspect.nameRu(), last.body.nameRu() });
+                try w.print(" (через {s}, после аспекта {s} {s})", .{
+                    util.fmtDur(&b_dur, last.t - now),
+                    last.aspect.nameRu(),
+                    last.body.nameRu(),
+                });
             }
-            try w.print(" до входа {s} ({s}).", .{ s.sign.next().accRu(), to });
+            try w.print(" по {s} — длится {s}, до входа Луны {s}.", .{
+                to, util.fmtDur(&b_dur, s.ingress - last.t), s.sign.next().accRu(),
+            });
         }
     }
 }
@@ -113,10 +122,10 @@ pub fn onTick(base: router.Base) !void {
                 util.fmtDateTime(&b_dt, s.voc_started, tz, base.now),
             });
         }
-        try w.print("Холостая до входа {s}: {s} (через {s})\n\n", .{
-            s.sign.next().accRu(),
+        try w.print("Закончится: {s} (через {s}) — Луна войдёт {s}\n\n", .{
             util.fmtDateTime(&b_dt, s.ingress, tz, base.now),
             util.fmtDur(&b_dur, s.ingress - base.now),
+            s.sign.next().accRu(),
         });
         try w.print("Не начинайте новых важных дел до конца периода.", .{});
     } else {
