@@ -693,6 +693,7 @@ const schema_sql =
     \\  created_at BIGINT NOT NULL DEFAULT 0,
     \\  decided_at BIGINT
     \\);
+    \\ALTER TABLE app_user ADD COLUMN IF NOT EXISTS premium BOOLEAN NOT NULL DEFAULT FALSE;
     \\CREATE TABLE IF NOT EXISTS layer_sample (
     \\  ts BIGINT NOT NULL,
     \\  mask INTEGER NOT NULL,
@@ -745,6 +746,8 @@ test "schema_sql: идемпотентные таблицы" {
     try std.testing.expect(std.mem.indexOf(u8, schema_sql, "CREATE TABLE IF NOT EXISTS bot_kv") != null);
     try std.testing.expect(std.mem.indexOf(u8, schema_sql, "CREATE TABLE IF NOT EXISTS tg_inbox") != null);
     try std.testing.expect(std.mem.indexOf(u8, schema_sql, "premium BOOLEAN NOT NULL DEFAULT FALSE") != null);
+    // миграция существующей таблицы: CREATE IF NOT EXISTS колонку не добавит
+    try std.testing.expect(std.mem.indexOf(u8, schema_sql, "ALTER TABLE app_user ADD COLUMN IF NOT EXISTS premium") != null);
     // несколько команд в одном batch — допустимо простым протоколом
     try std.testing.expect(std.mem.indexOf(u8, schema_sql, ";") != null);
 }
