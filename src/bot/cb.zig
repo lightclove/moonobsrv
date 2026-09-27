@@ -159,9 +159,13 @@ pub fn menuKb(w: *std.Io.Writer) !void {
     try w.writeAll("{\"inline_keyboard\":[[");
     try btn(w, "🌑 Луна сейчас", "menu:cmd:/voc");
     try w.writeAll("],[");
+    try btn(w, "🔮 Ближайшая холостая", "menu:cmd:/vocnext");
+    try w.writeAll("],[");
     try btn(w, "☿ Меркурий", "menu:cmd:/mercury");
     try w.writeAll("],[");
     try btn(w, "🌗 Лунный день", "menu:cmd:/day");
+    try w.writeAll("],[");
+    try btn(w, "🌕 Полнолуние", "menu:cmd:/fullmoon");
     try w.writeAll("],[");
     try btn(w, "🪐 Планеты", "menu:cmd:/planets");
     try w.writeAll("],[");
@@ -187,6 +191,8 @@ test "menuKb: валидный JSON с короткими callback_data" {
     defer parsed.deinit();
     const s = w.buffered();
     try std.testing.expect(std.mem.indexOf(u8, s, "menu:cmd:/voc") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "menu:cmd:/vocnext") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "menu:cmd:/fullmoon") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "menu:cmd:/subscribe") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "wiz:p:0") != null);
 }

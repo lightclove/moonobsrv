@@ -51,8 +51,9 @@ pub fn writeStatus(now: i64, tz: i32, obs: rise.Observer, w: *std.Io.Writer) !vo
         try w.print("Закончатся: {s}\n", .{util.fmtDateTime(&b_dt, r.ends, tz, now)});
     }
 
-    try w.print("\n🌙 Луна {s} {s}, освещённость {d}%, фаза: {s}\n", .{
-        info.sign.glyph(), info.sign.inRu(), @as(u32, @intFromFloat(info.illum_pct + 0.5)), info.phase,
+    try w.print("\n🌙 Луна {s} {s}, {s}, освещённость {d}%, фаза: {s}\n", .{
+        info.sign.glyph(), info.sign.inRu(), if (info.waxing) "растущая" else "убывающая",
+        @as(u32, @intFromFloat(info.illum_pct + 0.5)), info.phase,
     });
     try w.print("\nДве системы счёта. Титхи (индийская традиция) — 30-я часть лунного месяца, едина для всей Земли: {d}-й день начинается, когда элонгация Луна–Солнце проходит {d}°. Система Глобы (русская традиция, «постсоветская» астрология) — лунные сутки от восхода до восхода Луны в вашем месте, 1-е — с момента новолуния; к концу месяца отстают от титхи на 1–2 номера.", .{ info.number, @as(u16, info.number - 1) * 12 });
 }
@@ -77,7 +78,9 @@ pub fn onTick(base: router.Base) !void {
     if (lunday_rise.assess(base.now, observerOf(base.cfg))) |r| {
         try w.print("По Глобе — {d}-е лунные сутки, до {s}\n", .{ r.number, util.fmtDateTime(&b_dt, r.ends, tz, base.now) });
     }
-    try w.print("Луна {s} {s}, фаза: {s}", .{ info.sign.glyph(), info.sign.inRu(), info.phase });
+    try w.print("Луна {s} {s}, {s}, фаза: {s}", .{
+        info.sign.glyph(), info.sign.inRu(), if (info.waxing) "растущая" else "убывающая", info.phase,
+    });
     var snap: [256]i64 = undefined;
     notify.broadcast(base.api, base.store.subsSnapshot(&snap), w.buffered());
 }

@@ -30,6 +30,11 @@ fn cmdVoc(ctx: *router.Ctx) !void {
     try writeStatus(now, ctx.base.cfg.tz_offset_sec, ctx.reply);
 }
 
+fn cmdVocNext(ctx: *router.Ctx) !void {
+    const now = try ctx.moment();
+    try writeForecast(now, ctx.base.cfg.tz_offset_sec, ctx.reply);
+}
+
 /// Полный статус: используется и командой, и режимом --today.
 pub fn writeStatus(now: i64, tz: i32, w: *std.Io.Writer) !void {
     var abuf: [voc.max_aspects]voc.AspectEvent = undefined;
@@ -98,6 +103,67 @@ pub fn writeStatus(now: i64, tz: i32, w: *std.Io.Writer) !void {
     }
 }
 
+/// Расписание холстых периодов: ближайший (идущий или будущий) и следующий
+/// за ним, оба «с … по …». Отвечает на вопрос «когда будет ближайшая
+/// холостая», даже если сейчас Луна уже холостая или до периода несколько
+/// дней. Подробности текущего состояния — /voc, это именно прогноз.
+pub fn writeForecast(now: i64, tz: i32, w: *std.Io.Writer) !void {
+    var abuf: [voc.max_aspects]voc.AspectEvent = undefined;
+    var periods: [voc.max_periods]voc.Period = undefined;
+    const n = voc.nextPeriods(now, &abuf, &periods);
+    if (n == 0) return error.NoVocPeriod;
+
+    var b_dt: [64]u8 = undefined;
+    var b_dt2: [64]u8 = undefined;
+    var b_dur: [32]u8 = undefined;
+    var b_dur2: [32]u8 = undefined;
+
+    const p0 = periods[0];
+    try w.print("🔮 Ближайшая холостая Луна\n\n", .{});
+    if (p0.active(now)) {
+        try w.print("🌚 Луна уже холостая — период идёт.\n", .{});
+        try w.print("Текущий ({s} {s}): с {s} по {s} — длится {s}, закончится через {s}", .{
+            p0.sign.glyph(),
+            p0.sign.nameRu(),
+            util.fmtDateTime(&b_dt, p0.start, tz, now),
+            util.fmtDateTime(&b_dt2, p0.end, tz, now),
+            util.fmtDur(&b_dur, p0.end - p0.start),
+            util.fmtDur(&b_dur2, p0.end - now),
+        });
+    } else {
+        try w.print("🌒 Луна сейчас не холостая.\n", .{});
+        try w.print("Ближайший ({s} {s}): с {s}", .{
+            p0.sign.glyph(),
+            p0.sign.nameRu(),
+            util.fmtDateTime(&b_dt, p0.start, tz, now),
+        });
+        if (p0.from_aspect) |a| {
+            try w.print(" (через {s}, после аспекта {s} {s})", .{
+                util.fmtDur(&b_dur, p0.start - now),
+                a.aspect.nameRu(),
+                a.body.nameRu(),
+            });
+        } else {
+            try w.print(" — весь знак без аспектов", .{});
+        }
+        try w.print(" по {s} — длится {s}", .{
+            util.fmtDateTime(&b_dt2, p0.end, tz, now),
+            util.fmtDur(&b_dur, p0.end - p0.start),
+        });
+    }
+    if (n > 1) {
+        const p1 = periods[1];
+        try w.print("\nЗатем ({s} {s}): с {s} по {s} — длится {s}", .{
+            p1.sign.glyph(),
+            p1.sign.nameRu(),
+            util.fmtDateTime(&b_dt, p1.start, tz, now),
+            util.fmtDateTime(&b_dt2, p1.end, tz, now),
+            util.fmtDur(&b_dur, p1.end - p1.start),
+        });
+    }
+    try w.print("\n\nПланируйте важные дела, сделки и покупки вне этих окон — холостое время «пустых» результатов.", .{});
+}
+
 /// Ватчер: уведомляет подписчиков о переходах VOC.
 pub fn onTick(base: router.Base) !void {
     var abuf: [voc.max_aspects]voc.AspectEvent = undefined;
@@ -135,8 +201,31 @@ pub fn onTick(base: router.Base) !void {
         });
         try w.print("Можно снова браться за новые дела.", .{});
     }
+    // уведомления о холостой Луне — премиум: рассылаем обычным подписчикам
+    // и премиум-вайт-листу без дублей
     var snap: [256]i64 = undefined;
-    notify.broadcast(base.api, base.store.subsSnapshot(&snap), w.buffered());
+    var snap2: [256]i64 = undefined;
+    const subs = base.store.subsSnapshot(&snap);
+    const prem = base.store.premiumSnapshot(&snap2);
+    var merged: [512]i64 = undefined;
+    var n: usize = 0;
+    for (subs) |id| {
+        if (n >= merged.len) break;
+        merged[n] = id;
+        n += 1;
+    }
+    for (prem) |id| {
+        if (n >= merged.len) break;
+        var dup = false;
+        for (merged[0..n]) |x| {
+            if (x == id) dup = true;
+        }
+        if (!dup) {
+            merged[n] = id;
+            n += 1;
+        }
+    }
+    notify.broadcast(base.api, merged[0..n], w.buffered());
 }
 
 pub const feature = features.Feature{
@@ -146,6 +235,12 @@ pub const feature = features.Feature{
             .aliases = &.{ "/void", "/холостая" },
             .description = "холостая Луна сейчас или на дату (/voc 21.09)",
             .handler = cmdVoc,
+        },
+        .{
+            .name = "/vocnext",
+            .aliases = &.{ "/next", "/ближайшая" },
+            .description = "ближайшие холостые периоды: с … по …",
+            .handler = cmdVocNext,
         },
     },
     .on_tick = onTick,

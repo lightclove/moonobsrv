@@ -17,7 +17,9 @@ pub const Quick = struct {
 /// Пункты те же, что в inline-меню (cb.zig menuKb) — один словарь запросов.
 pub const quick = [_]Quick{
     .{ .label = "🌑 Луна сейчас", .cmd = "/voc" },
+    .{ .label = "🔮 Ближайшая холостая", .cmd = "/vocnext" },
     .{ .label = "🌗 Лунный день", .cmd = "/day" },
+    .{ .label = "🌕 Полнолуние", .cmd = "/fullmoon" },
     .{ .label = "☿ Меркурий", .cmd = "/mercury" },
     .{ .label = "🪐 Планеты", .cmd = "/planets" },
     .{ .label = "🔔 Подписка", .cmd = "/subscribe" },

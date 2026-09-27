@@ -19,6 +19,7 @@ const f_planets = @import("planets.zig");
 const f_service = @import("service.zig");
 const f_wizard = @import("wizard.zig");
 const f_monitor = @import("monitor.zig");
+const f_premium = @import("premium.zig");
 
 pub const all = [_]Feature{
     f_voc.feature,
@@ -28,6 +29,7 @@ pub const all = [_]Feature{
     f_service.feature,
     f_wizard.feature,
     f_monitor.feature,
+    f_premium.feature,
 };
 
 /// Плоский реестр команд, собранный на компиляции из всех фич.

@@ -1,0 +1,42 @@
+{
+  "mcpServers": {
+    "lsp": {
+      "type": "stdio",
+      "command": "agent-lsp",
+      "args": ["zig:tools/zls/zls.exe"],
+      "env": {
+        "ZLS_BUILD_CACHE_PATH": "C:/Users/admin/Work/moonobsrv/tools/zls-cache",
+        "ZLS_GLOBAL_CACHE_PATH": "C:/Users/admin/Work/moonobsrv/tools/zls-cache"
+      }
+    },
+    "fetch": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["mcp-server-fetch"]
+    },
+    "git": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["mcp-server-git", "-r", "C:/Users/admin/Work/moonobsrv"],
+      "env": { "GIT_PYTHON_REFRESH_MODE": "silence" }
+    },
+    "time": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["mcp-server-time", "--local-timezone", "Europe/Moscow"]
+    },
+    "memory": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"],
+      "env": {
+        "MEMORY_FILE_PATH": "C:/Users/admin/Work/moonobsrv/agents/memory/memory.json"
+      }
+    },
+    "sequential-thinking": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"]
+    }
+  }
+}

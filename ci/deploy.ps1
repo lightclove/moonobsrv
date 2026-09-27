@@ -7,6 +7,30 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# PS 5.1 with -File drops unrecognized args into $args and keeps running:
+# `deploy.cmd --help` (or a typo like -Statuss) used to start a FULL deploy
+# of prod. Help tokens print usage; any other stray argument aborts.
+# ASCII only: Windows PowerShell 5 reads .ps1 without BOM as ANSI (BUG-009).
+if ($args) {
+    $helpTokens = @('--help', '-help', 'help', '-?', '/?', '?')
+    $unknown = @()
+    foreach ($a in $args) {
+        if ($helpTokens -notcontains $a) { $unknown += $a }
+    }
+    if ($unknown.Count -eq 0) {
+        Write-Host 'deploy.cmd - deploy moonobsrv from Windows dev box to Arch prod.'
+        Write-Host ''
+        Write-Host '  deploy.cmd             full deploy: tests -> linux-musl build -> tar -> scp -> compose up'
+        Write-Host '  deploy.cmd -Status     prod status: compose ps + tail of bot logs'
+        Write-Host '  deploy.cmd -SkipTest   deploy without running the test suite (faster, risky)'
+        Write-Host '  deploy.cmd --help      this usage text'
+        exit 0
+    }
+    Write-Host "unknown argument(s): $($unknown -join ', ')" -ForegroundColor Red
+    Write-Host 'usage: deploy.cmd [-Status] [-SkipTest] [--help]' -ForegroundColor Red
+    exit 1
+}
 $Root = Split-Path -Parent $PSScriptRoot
 
 # Target from netaccess/.credentials (fallback: defaults)

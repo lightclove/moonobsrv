@@ -1,0 +1,76 @@
+{
+  "entities": [
+    {
+      "name": "moonobsrv",
+      "entityType": "project",
+      "observations": [
+        "Телеграм-бот-астроном на чистом Zig 0.15.2, ноль внешних зависимостей",
+        "Тулчейн вложен в tools/zig-0.15.2, языковый сервер zls 0.15.1 — в tools/zls",
+        "Версия 1.4.0 (2026-09-21); unreleased: обвязка агентов agents/ + MCP",
+        "Архитектура: 6 этажей — astro → net → db → bot → features → main, зависимости строго вниз",
+        "Астроядро чистое: f64 → f64, без аллокатора, буферы передаёт вызывающий",
+        "Сборка: z.cmd build test (104 теста), z.cmd build -Drelease — ReleaseSmall, прод-бинарь linux-musl 715 КБ",
+        "Прод: docker compose bot+postgres+tor на Arch, деплой deploy.cmd с Windows; связь с Telegram через Tor (obfs4-мосты)",
+        "TELEGRAM_ACCESS_ID на проде не задан — бот в открытом режиме разработки",
+        "Конвенции AGENTS.md: changelog тем же ходом, баги карточками BUG-NNN, semver в src/runtime.zig",
+        "Живой бот: @moonobsrv_bot"
+      ]
+    },
+    {
+      "name": "moonobsrv/astro",
+      "entityType": "component",
+      "observations": [
+        "Солнце — Meeus 25 (±0.01°), Луна — 58 членов ELP2000 (±0.05°), планеты — кеплеровские элементы Standish (1800–2050)",
+        "Границы ищутся бисекцией по монотонной «пиле» wrap180, шаг скана 0.02 (~29 мин)",
+        "VOC: аспекты к 6 видимым телам; соединение/оппозиция ищутся однократно (BUG-015)",
+        "Восходы: окно скана 10 суток — на высоких широтах паузы восходов длиннее суток (BUG-060)",
+        "Тени ретро: окно поиска 200 суток, у внешних планет дуги месяцы (BUG-057)"
+      ]
+    },
+    {
+      "name": "moonobsrv/net",
+      "entityType": "component",
+      "observations": [
+        "Свой HTTPS-клиент вместо std.http.Client (тот не умеет SOCKS): TLS 1.3 поверх TCP или SOCKS5",
+        "Буферы сокет-писателя ≥ tls.min_buffer_len (~17 КБ) — меньше = UB в ReleaseSmall",
+        "После flush TLS-писателя обязателен flush сокет-писателя",
+        "Ретрай на обрыв сбрасывает частичное тело — иначе повтор дописывал к обрывку (BUG-046)",
+        "SOCKS5: домен в прокси (ATYP=3) — DNS резолвит сам Tor; IPv6-литерал — ATYP=4 (BUG-059)"
+      ]
+    },
+    {
+      "name": "moonobsrv/db/pg",
+      "entityType": "component",
+      "observations": [
+        "Клиент PostgreSQL wire-протокола v3 без зависимостей: trust/cleartext/md5, SCRAM нет",
+        "URL парсится по последнему '@': '/' и '@' в пароле не ломают разбор (BUG-047)",
+        "SQL собирается в фиксированные буферы с подсчётом худшего случая (BUG-024)"
+      ]
+    },
+    {
+      "name": "moonobsrv/bot/wd",
+      "entityType": "component",
+      "observations": [
+        "Docker Engine API сырым HTTP/1.0 над /var/run/docker.sock",
+        "JSON от Docker не доверять: Labels может быть null (BUG-042)",
+        "Анти-бутлуп: ACK до рестарта, стоп-кран просматривает пачку целиком, inflight-яд, кулдаун 90 с"
+      ]
+    },
+    {
+      "name": "moonobsrv/agents",
+      "entityType": "component",
+      "observations": [
+        "Обвязка агентов: роли developer/reviewer/qa-evil, воркфлоу конвейером, MCP lsp+fetch+git+time+memory+sequential-thinking+github",
+        "LSR: agent-lsp 0.20.0 (npm, глобально) + zls 0.15.1 в tools/zls; конфиг .mcp.json",
+        "Роли ортогональны: разработчик не одобряет свой код, ревьюер не пишет фичи, QA не чинит"
+      ]
+    }
+  ],
+  "relations": [
+    { "from": "moonobsrv/astro", "to": "moonobsrv", "relationType": "part_of" },
+    { "from": "moonobsrv/net", "to": "moonobsrv", "relationType": "part_of" },
+    { "from": "moonobsrv/db/pg", "to": "moonobsrv", "relationType": "part_of" },
+    { "from": "moonobsrv/bot/wd", "to": "moonobsrv", "relationType": "part_of" },
+    { "from": "moonobsrv/agents", "to": "moonobsrv", "relationType": "part_of" }
+  ]
+}

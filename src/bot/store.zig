@@ -28,6 +28,10 @@ const Persist = struct {
     jupiter_retro: ?bool = null,
     saturn_retro: ?bool = null,
     lunar_day: ?u8 = null,
+    /// Ключ последнего полнолуния, о котором предупреждали (день unix-момента).
+    fullmoon_warn: ?i64 = null,
+    /// Ступень последнего предупреждения: 0 — за 2 сут, 1 — за сутки, 2 — момент.
+    fullmoon_step: ?u8 = null,
     last_update_id: i64 = 0,
 };
 
@@ -64,6 +68,10 @@ pub const Store = struct {
     subs: std.ArrayList(i64),
     /// Кэш active-пользователей whitelist (обновляется при allow/revoke/load).
     active: std.ArrayList(i64),
+    /// Кэш премиум-пользователей (вайт-лист избранных + оплативших).
+    premium: std.ArrayList(i64),
+    /// Админ — всегда премиум; 0 — админского контура нет.
+    admin_id: i64 = 0,
     voc_active: ?bool = null,
     mercury_retro: ?bool = null,
     venus_retro: ?bool = null,
@@ -71,12 +79,14 @@ pub const Store = struct {
     jupiter_retro: ?bool = null,
     saturn_retro: ?bool = null,
     lunar_day: ?u8 = null,
+    fullmoon_warn: ?i64 = null,
+    fullmoon_step: ?u8 = null,
     last_update_id: i64 = 0,
 
     /// Вызывается один раз при старте, до запуска потоков.
     /// Отсутствие файла — не ошибка: начинаем с чистого состояния.
     pub fn load(alloc: std.mem.Allocator, dir: []const u8) Store {
-        var st = Store{ .alloc = alloc, .dir = dir, .subs = .empty, .active = .empty };
+        var st = Store{ .alloc = alloc, .dir = dir, .subs = .empty, .active = .empty, .premium = .empty };
         const path = std.fs.path.join(alloc, &.{ dir, "state.json" }) catch return st;
         defer alloc.free(path);
         const bytes = std.fs.cwd().readFileAlloc(alloc, path, 1 << 20) catch return st;
@@ -90,6 +100,8 @@ pub const Store = struct {
         st.jupiter_retro = parsed.value.jupiter_retro;
         st.saturn_retro = parsed.value.saturn_retro;
         st.lunar_day = parsed.value.lunar_day;
+        st.fullmoon_warn = parsed.value.fullmoon_warn;
+        st.fullmoon_step = parsed.value.fullmoon_step;
         st.last_update_id = parsed.value.last_update_id;
         st.subs.appendSlice(alloc, parsed.value.subs) catch {};
         return st;
@@ -98,6 +110,7 @@ pub const Store = struct {
     /// Подключение к Postgres: схема, bootstrap админа, кэши. Ошибки не
     /// фатальны — бот продолжает в режиме JSON (без whitelist/idle).
     pub fn attachDb(self: *Store, url: []const u8, admin_id: i64) !void {
+        self.admin_id = admin_id;
         const conn = try self.alloc.create(pg.Conn);
         errdefer self.alloc.destroy(conn);
         conn.* = try pg.Conn.init(self.alloc, url);
@@ -116,7 +129,7 @@ pub const Store = struct {
         if (admin_id != 0) {
             var b: [256]u8 = undefined;
             var w: std.Io.Writer = .fixed(&b);
-            w.print("INSERT INTO app_user (tg_id, status, created_at) VALUES ({d}, 'active', {d}) ON CONFLICT (tg_id) DO NOTHING", .{ admin_id, std.time.timestamp() }) catch {};
+            w.print("INSERT INTO app_user (tg_id, status, premium, created_at) VALUES ({d}, 'active', TRUE, {d}) ON CONFLICT (tg_id) DO UPDATE SET premium = TRUE", .{ admin_id, std.time.timestamp() }) catch {};
             _ = conn.exec(arena.allocator(), w.buffered()) catch |e| log("pg bootstrap admin: {s}", .{@errorName(e)});
         }
         self.db = conn;
@@ -129,6 +142,7 @@ pub const Store = struct {
         defer self.mutex.unlock();
         self.subs.clearRetainingCapacity();
         self.active.clearRetainingCapacity();
+        self.premium.clearRetainingCapacity();
         const db = self.db orelse return;
         var arena = std.heap.ArenaAllocator.init(self.alloc);
         defer arena.deinit();
@@ -142,6 +156,13 @@ pub const Store = struct {
         for (act.rows) |row| {
             const id = std.fmt.parseInt(i64, row.values[0] orelse continue, 10) catch continue;
             self.active.append(self.alloc, id) catch {};
+        }
+        // премиум-вайт-лист: избранные админом + оплатившие; админ добавляется
+        // при attachDb, здесь — только то, что в БД
+        const prem = db.exec(a, "SELECT tg_id FROM app_user WHERE premium") catch return;
+        for (prem.rows) |row| {
+            const id = std.fmt.parseInt(i64, row.values[0] orelse continue, 10) catch continue;
+            self.premium.append(self.alloc, id) catch {};
         }
     }
 
@@ -176,6 +197,8 @@ pub const Store = struct {
             .jupiter_retro = self.jupiter_retro,
             .saturn_retro = self.saturn_retro,
             .lunar_day = self.lunar_day,
+            .fullmoon_warn = self.fullmoon_warn,
+            .fullmoon_step = self.fullmoon_step,
             .last_update_id = self.last_update_id,
         }, .{}, &aw.writer);
 
@@ -229,6 +252,96 @@ pub const Store = struct {
         defer self.mutex.unlock();
         self.lunar_day = v;
         try self.saveLocked();
+    }
+
+    /// Ключ полнолуния, о котором уже предупреждали (null — ещё не было).
+    pub fn fullmoonWarn(self: *Store) ?i64 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.fullmoon_warn;
+    }
+
+    pub fn setFullmoonWarn(self: *Store, v: i64) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.fullmoon_warn = v;
+        try self.saveLocked();
+    }
+
+    /// Ступень последнего предупреждения о полнолунии.
+    pub fn fullmoonStep(self: *Store) ?u8 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.fullmoon_step;
+    }
+
+    /// Запомнить ступень без записи на диск — следом пишет setFullmoonWarn.
+    pub fn setFullmoonStep(self: *Store, v: u8) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.fullmoon_step = v;
+    }
+
+    // ─── Премиум-подписка (уведомления о полнолунии и холостой Луне) ────────
+
+    /// true — у пользователя премиум (вайт-лист избранных + оплативших).
+    /// Без БД — все премиум (режим разработки); с БД — колонка app_user.premium.
+    pub fn isPremium(self: *Store, id: i64) bool {
+        if (self.db == null) return true;
+        if (id == self.admin_id) return true;
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.premium.items) |x| {
+            if (x == id) return true;
+        }
+        return false;
+    }
+
+    /// Выдать/снять премиум (вайт-лист избранных). true — изменено.
+    pub fn setPremium(self: *Store, id: i64, on: bool) bool {
+        const db = self.db orelse return false;
+        var arena = std.heap.ArenaAllocator.init(self.alloc);
+        defer arena.deinit();
+        var b: [128]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&b);
+        if (on) {
+            w.print("INSERT INTO app_user (tg_id, status, premium, created_at) VALUES ({d}, 'active', TRUE, {d}) ON CONFLICT (tg_id) DO UPDATE SET premium = TRUE", .{ id, std.time.timestamp() }) catch return false;
+        } else {
+            w.print("UPDATE app_user SET premium = FALSE WHERE tg_id = {d}", .{id}) catch return false;
+        }
+        const ok = if (db.exec(arena.allocator(), w.buffered())) |_| true else |_| false;
+        self.db_ok = ok;
+        if (!ok) return false;
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (on) {
+            var found = false;
+            for (self.premium.items) |x| {
+                if (x == id) found = true;
+            }
+            if (!found) self.premium.append(self.alloc, id) catch {};
+        } else {
+            var i: usize = 0;
+            while (i < self.premium.items.len) : (i += 1) {
+                if (self.premium.items[i] == id) {
+                    _ = self.premium.orderedRemove(i);
+                    break;
+                }
+            }
+        }
+        return true;
+    }
+
+    /// Список премиум-подписчиков (notify + premium) в буфер вызывающего.
+    pub fn premiumSnapshot(self: *Store, buf: []i64) []i64 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const n = @min(buf.len, self.premium.items.len);
+        if (self.premium.items.len > n) {
+            log("premiumSnapshot: {d} премиум сверх буфера не попали в рассылку", .{self.premium.items.len - n});
+        }
+        @memcpy(buf[0..n], self.premium.items[0..n]);
+        return buf[0..n];
     }
 
     // ─── Курсор Telegram ───────────────────────────────────────────────────
@@ -566,6 +679,7 @@ pub const Store = struct {
         }
         self.subs.deinit(self.alloc);
         self.active.deinit(self.alloc);
+        self.premium.deinit(self.alloc);
     }
 };
 
@@ -575,6 +689,7 @@ const schema_sql =
     \\  status TEXT NOT NULL,
     \\  display_name TEXT NOT NULL DEFAULT '',
     \\  notify BOOLEAN NOT NULL DEFAULT FALSE,
+    \\  premium BOOLEAN NOT NULL DEFAULT FALSE,
     \\  created_at BIGINT NOT NULL DEFAULT 0,
     \\  decided_at BIGINT
     \\);
@@ -629,8 +744,27 @@ test "schema_sql: идемпотентные таблицы" {
     try std.testing.expect(std.mem.indexOf(u8, schema_sql, "CREATE TABLE IF NOT EXISTS layer_sample") != null);
     try std.testing.expect(std.mem.indexOf(u8, schema_sql, "CREATE TABLE IF NOT EXISTS bot_kv") != null);
     try std.testing.expect(std.mem.indexOf(u8, schema_sql, "CREATE TABLE IF NOT EXISTS tg_inbox") != null);
+    try std.testing.expect(std.mem.indexOf(u8, schema_sql, "premium BOOLEAN NOT NULL DEFAULT FALSE") != null);
     // несколько команд в одном batch — допустимо простым протоколом
     try std.testing.expect(std.mem.indexOf(u8, schema_sql, ";") != null);
+}
+
+test "premium: без БД все премиум, snapshot по буферу" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const alloc = std.testing.allocator;
+    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir);
+    var st = Store.load(alloc, dir);
+    defer st.subs.deinit(alloc);
+    defer st.active.deinit(alloc);
+    defer st.premium.deinit(alloc);
+    // режим разработки: премиум-уведомления доступны всем
+    try std.testing.expect(st.isPremium(999));
+    try std.testing.expect(!st.dbMode());
+    // премиум-кэш пуст: рассылка никому (админа добавляет только БД-режим)
+    var snap: [4]i64 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), st.premiumSnapshot(&snap).len);
 }
 
 test "SQL заявки: экранированное имя не затирается префиксом (BUG-019)" {

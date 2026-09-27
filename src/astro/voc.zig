@@ -67,6 +67,24 @@ pub const AspectEvent = struct {
 
 pub const max_aspects = 24;
 
+/// Холостой период: от последнего точного аспекта в знаке (или от входа
+/// в знак, если аспектов в знаке нет) до ингрессии в следующий знак.
+pub const Period = struct {
+    sign: Sign,
+    start: i64, // Unix
+    end: i64, // Unix
+    /// Аспект, после которого Луна стала холостой; null — знак без аспектов.
+    from_aspect: ?AspectEvent,
+
+    /// Период уже идёт в момент t.
+    pub fn active(self: Period, t: i64) bool {
+        return self.start <= t and t < self.end;
+    }
+};
+
+/// Сколько периодов вперёд даёт расписание nextPeriods.
+pub const max_periods = 2;
+
 pub const Status = struct {
     now: i64,
     sign: Sign,
@@ -172,4 +190,33 @@ pub fn assess(now_unix: i64, buf: *[max_aspects]AspectEvent) Status {
         .voc_started = if (last_le_now) |ev| ev.t else time.unixFromJd(entered_jd),
         .voc_last_aspect = last_le_now,
     };
+}
+
+/// Ближайший холостой период: содержащий t (если Луна уже холостая) или
+/// начинающийся после t. Всегда в текущем знаке Луны: последний аспект
+/// знака и ингрессия ограничивают ровно один такой период.
+pub fn nextPeriod(t: i64, buf: *[max_aspects]AspectEvent) Period {
+    const s = assess(t, buf);
+    if (s.aspects.len > 0) {
+        const last = s.aspects[s.aspects.len - 1];
+        return .{ .sign = s.sign, .start = last.t, .end = s.ingress, .from_aspect = last };
+    }
+    return .{ .sign = s.sign, .start = s.sign_entered, .end = s.ingress, .from_aspect = null };
+}
+
+/// Расписание на вперёд: первый период — ближайший к t, дальше по одному
+/// на каждый следующий знак Луны. Пишет в out, возвращает число периодов.
+pub fn nextPeriods(t: i64, buf: *[max_aspects]AspectEvent, out: *[max_periods]Period) usize {
+    var n: usize = 0;
+    var cursor = t;
+    while (n < max_periods) {
+        const p = nextPeriod(cursor, buf);
+        if (n > 0 and p.start == out[n - 1].start and p.end == out[n - 1].end) break;
+        out[n] = p;
+        n += 1;
+        // минута после ингрессии — Луна уже в следующем знаке
+        // (точность бисекции ingress — доли секунды)
+        cursor = p.end + 60;
+    }
+    return n;
 }

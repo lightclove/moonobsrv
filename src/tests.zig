@@ -25,6 +25,7 @@ test {
     _ = @import("bot/cb.zig");
     _ = @import("bot/keys.zig");
     _ = @import("features/features.zig");
+    _ = @import("features/premium.zig");
     _ = @import("hostwatch.zig");
 }
 
@@ -145,6 +146,38 @@ test "VOC: нет дублей аспектов (каждое событие о�
     }
 }
 
+// Расписание /vocnext: 09.09.2026 утром (03:00 МСК) Луна во Льве не холостая —
+// ближайший период кончается ингрессией в Деву в 22:36 МСК, следующий —
+// в самой Деве; в 22:00 МСК (VOC уже идёт) ближайший период — текущий.
+test "якорь: расписание холстых периодов (nextPeriods)" {
+    var abuf: [voc.max_aspects]voc.AspectEvent = undefined;
+    var periods: [voc.max_periods]voc.Period = undefined;
+    const t = time.unixUTC(2026, 9, 9, 0, 0);
+    const n = voc.nextPeriods(t, &abuf, &periods);
+    try std.testing.expect(n >= 2);
+
+    const p0 = periods[0];
+    try std.testing.expect(!p0.active(t)); // 03:00 МСК — не холостая
+    try std.testing.expect(p0.start > t);
+    try expectNearDay(p0.end, time.unixUTC(2026, 9, 9, 19, 36), 30 * 60); // вход в Деву 22:36 МСК
+    try std.testing.expect(p0.from_aspect != null); // период начнётся аспектом, не входом в знак
+
+    const p1 = periods[1];
+    try std.testing.expectEqual(voc.Sign.virgo, p1.sign);
+    try std.testing.expect(p1.start >= p0.end);
+    try std.testing.expect(p1.end > p1.start);
+
+    // внутри холостого периода ближайший — уже идущий
+    var abuf2: [voc.max_aspects]voc.AspectEvent = undefined;
+    var periods2: [voc.max_periods]voc.Period = undefined;
+    const t2 = 1788980400; // 22:00 МСК 09.09 — VOC перед входом в Деву
+    const n2 = voc.nextPeriods(t2, &abuf2, &periods2);
+    try std.testing.expect(n2 >= 1);
+    try std.testing.expect(periods2[0].active(t2));
+    try std.testing.expect(periods2[0].start <= t2);
+    try expectNearDay(periods2[0].end, time.unixUTC(2026, 9, 9, 19, 36), 30 * 60);
+}
+
 test "реестр команд: /planets зарегистрирован (BUG-037)" {
     const features_mod = @import("features/features.zig");
     var found = false;
@@ -166,6 +199,16 @@ test "лунный день: инварианты" {
     // в момент новолуния 2026-08-12 начинается 1-й лунный день
     const nm = lunday.assess(time.unixUTC(2026, 8, 12, 19, 0));
     try std.testing.expect(nm.number == 1);
+}
+
+// Рост/убывание: элонгация < 180° — растущая, > 180° — убывающая.
+// 09.09.2026 — 29-й титхи перед новолунием 11.09 (убывающая),
+// 12.09.2026 — 2-й титхи после него (растущая).
+test "якорь: Луна растёт и убывает" {
+    try std.testing.expect(!lunday.assess(time.unixUTC(2026, 9, 9, 12, 0)).waxing);
+    try std.testing.expect(lunday.assess(time.unixUTC(2026, 9, 12, 12, 0)).waxing);
+    try std.testing.expect(lunday.assess(time.unixUTC(2026, 8, 12, 19, 0)).waxing); // новолуние — уже рост нового цикла
+    try std.testing.expect(!lunday.assess(time.unixUTC(2026, 3, 3, 12, 33)).waxing); // полнолуние 03.03.2026 (элонгация 180° в 12:12 UTC)
 }
 
 // Новолуния вокруг даты запуска: затмение 12.08.2026 17:46 UTC и 11.09.2026 03:27 UTC
@@ -346,6 +389,26 @@ test "тексты фич: форматирование без мусора" {
     try std.testing.expect(std.mem.indexOf(u8, wv.buffered(), "через") != null);
     try std.testing.expect(std.mem.indexOf(u8, wv.buffered(), "22:36") != null);
 
+    // расписание /vocnext: та же ночь — оба периода «с … по …», конец
+    // первого = ингрессия в Деву в 22:36 МСК
+    var bufn: [4096]u8 = undefined;
+    var wn: std.Io.Writer = .fixed(&bufn);
+    try f_voc.writeForecast(now, 3 * 3600, &wn);
+    try std.testing.expect(std.mem.indexOf(u8, wn.buffered(), "не холостая") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wn.buffered(), "Ближайший") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wn.buffered(), " по ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wn.buffered(), "длится") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wn.buffered(), "Затем") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wn.buffered(), "22:36") != null);
+
+    // расписание внутри холостого периода: ближайший — уже идущий
+    var bufn2: [4096]u8 = undefined;
+    var wn2: std.Io.Writer = .fixed(&bufn2);
+    try f_voc.writeForecast(1788980400, 3 * 3600, &wn2);
+    try std.testing.expect(std.mem.indexOf(u8, wn2.buffered(), "уже холостая") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wn2.buffered(), "Текущий") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wn2.buffered(), "Затем") != null);
+
     var buf2: [4096]u8 = undefined;
     var w2: std.Io.Writer = .fixed(&buf2);
     try f_mercury.writeStatus(now, 3 * 3600, &w2);
@@ -370,6 +433,7 @@ test "тексты фич: форматирование без мусора" {
     var w3: std.Io.Writer = .fixed(&buf3);
     try f_lunday.writeStatus(now, 3 * 3600, moscow, &w3);
     try std.testing.expect(std.mem.indexOf(u8, w3.buffered(), "28-й лунный день") != null);
+    try std.testing.expect(std.mem.indexOf(u8, w3.buffered(), "убывающая") != null); // 29-й титхи — после полнолуния
     try std.testing.expect(std.mem.indexOf(u8, w3.buffered(), "324") != null); // (28-1)*12 без u8-переполнения
     try std.testing.expect(std.mem.indexOf(u8, w3.buffered(), "лунные сутки") != null); // блок «от восхода» есть
     try std.testing.expect(std.mem.indexOf(u8, w3.buffered(), "Глоб") != null); // система названа по имени (по Глобе/Глобы)

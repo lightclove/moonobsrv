@@ -17,6 +17,7 @@ pub const Info = struct {
     sign: voc.Sign,
     illum_pct: f64,
     phase: []const u8,
+    waxing: bool,
 };
 
 const ElongFn = struct {
@@ -43,6 +44,9 @@ pub fn assess(now_unix: i64) Info {
         .sign = voc.Sign.fromLongitude(moonmod.longitudeRaw(jd0)),
         .illum_pct = (1.0 - ang.cosD(e_wrapped)) / 2.0 * 100.0,
         .phase = phaseName(e_wrapped),
+        // элонгация < 180° — Луна уходит от Солнца вправо (растёт),
+        // > 180° — догоняет (убывает); само полнолуние — уже убывание
+        .waxing = e_wrapped < 180.0,
     };
 }
 
@@ -69,5 +73,13 @@ pub fn lastNewMoonJd(jd0: f64) f64 {
 pub fn nextNewMoonJd(jd0: f64) f64 {
     const f = ElongFn{};
     const target = (@floor(f.eval(jd0) / 360.0) + 1.0) * 360.0;
+    return ang.bisectRising(ElongFn, f, jd0, jd0 + 31.0, target);
+}
+
+/// Ближайшее полнолуние строго после jd0: сырая элонгация проходит
+/// очередной уровень 360°·k + 180 (элонгация строго растёт).
+pub fn nextFullMoonJd(jd0: f64) f64 {
+    const f = ElongFn{};
+    const target = (@floor((f.eval(jd0) - 180.0) / 360.0) + 1.0) * 360.0 + 180.0;
     return ang.bisectRising(ElongFn, f, jd0, jd0 + 31.0, target);
 }

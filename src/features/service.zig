@@ -65,6 +65,9 @@ fn cmdSubscribe(ctx: *router.Ctx) !void {
         return ctx.reply.print("⚠ Не удалось сохранить подписку, попробуйте позже.", .{});
     };
     try ctx.reply.print("🔔 Подписка оформлена.\nБуду присылать: начало и конец холостой Луны, станции Меркурия и других планет, начало лунных дней.\nОтписка: /unsubscribe", .{});
+    if (!ctx.base.store.isPremium(ctx.chat_id)) {
+        try ctx.reply.print("\n\n⭐ Уведомления о полнолунии — премиум: /premium", .{});
+    }
 }
 
 fn cmdUnsubscribe(ctx: *router.Ctx) !void {

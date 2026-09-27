@@ -33,6 +33,7 @@ const features = @import("features/features.zig");
 const f_voc = @import("features/voc.zig");
 const f_mercury = @import("features/mercury.zig");
 const f_lunday = @import("features/lunday.zig");
+const f_premium = @import("features/premium.zig");
 const f_planets = @import("features/planets.zig");
 const hostwatch = @import("hostwatch.zig");
 
@@ -441,6 +442,8 @@ fn printToday(alloc: std.mem.Allocator, cfg: config.Config) !void {
     try f_voc.writeStatus(now, cfg.tz_offset_sec, &aw.writer);
     try aw.writer.print("\n\n", .{});
     try f_mercury.writeStatus(now, cfg.tz_offset_sec, &aw.writer);
+    try aw.writer.print("\n\n", .{});
+    try f_premium.writeFullMoonText(now, cfg.tz_offset_sec, &aw.writer);
     try aw.writer.print("\n\n", .{});
     try f_lunday.writeStatus(now, cfg.tz_offset_sec, f_lunday.observerOf(&cfg), &aw.writer);
 
